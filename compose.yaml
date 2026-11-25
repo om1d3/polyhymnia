@@ -3,7 +3,7 @@
 services:
   audit:
     build: .
-    image: jellyfin-music-audit:local
+    image: polyhymnia:local
     network_mode: host
     env_file: .env
     user: "${PUID:-0}:${PGID:-0}"

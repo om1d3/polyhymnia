@@ -1,6 +1,10 @@
-# Jellyfin music audit
+<p align="center"><img src="docs/logo.png" width="128" alt="Polyhymnia logo: a golden lyre"></p>
 
-Check and fix the names, artists and covers of a Jellyfin music library, safely:
+# Polyhymnia
+
+*Named after the Muse of sacred song, keeper of many hymns.*
+
+Polyhymnia checks and fixes the names, artists and covers of a Jellyfin music library, safely:
 every change is shown as a dry run first, backed up before it is written, and can be undone.
 
 ## Requirements
@@ -63,6 +67,11 @@ The Docker image is built automatically on the first run, and rebuilt after a `g
 | 2. Pick | `../jfa covers-review`, then open `http://SERVER-IP:8765` in a browser; Ctrl+C when done |
 | 3. Dry run | `../jfa covers-apply` |
 | 4. Apply | `../jfa covers-apply --commit` |
+
+The cover picker shows the current and the new cover side by side; every album keeps its
+current cover unless you click the new one (demo albums shown):
+
+![Cover picker](docs/cover-picker.png)
 
 **Undo**: every write prints a backup file name. `../jfa restore backup-….json --commit` puts it back.
 

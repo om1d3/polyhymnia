@@ -1,5 +1,5 @@
 #!/bin/sh
-# jfa - run the Jellyfin music audit tool in Docker.
+# jfa - run Polyhymnia in Docker.
 # Run it from the folder that holds your data (exports, edited files, backups, covers):
 #   cd data && ../jfa check-names jellyfin_names_part0*_edited.json
 #   ../jfa bg covers-fetch       runs in the background and survives logging out

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-jellyfin_music_audit.py - check and fix Jellyfin music metadata and covers, safely.
+Polyhymnia - check and fix Jellyfin music metadata and covers, safely.
+(Named after the Muse of sacred song.)
 
 Names: edit them yourself (or have someone review them) as JSON
   export-names   Write album names, album artists, track titles and track artists to JSON.
@@ -27,12 +28,12 @@ Setup
   export MB_CONTACT=you@example.com    (MusicBrainz asks for contact info in the User-Agent)
 
 Examples
-  python jellyfin_music_audit.py export-names --split 250
-  python jellyfin_music_audit.py import-names jellyfin_names_part01.json part01_edited.json
-  python jellyfin_music_audit.py covers-fetch
-  python jellyfin_music_audit.py covers-review --port 8765
-  python jellyfin_music_audit.py covers-apply --commit
-  python jellyfin_music_audit.py audit --compare-covers --sentence-case track
+  jfa export-names --split 250
+  jfa import-names jellyfin_names_part01.json part01_edited.json
+  jfa covers-fetch
+  jfa covers-review --port 8765
+  jfa covers-apply --commit
+  jfa audit --compare-covers --sentence-case track
 """
 import argparse
 import base64
@@ -59,7 +60,7 @@ try:
 except ImportError:
     sys.exit("This script needs the requests package: pip install requests")
 
-VERSION = "1.0"
+VERSION = "1.1"
 CSV_COLUMNS = ["approve", "field", "severity", "confidence", "album_artist", "album",
                "disc", "track", "current", "proposed", "similarity", "note",
                "album_id", "item_id", "mb_release_id"]
@@ -195,8 +196,8 @@ class Jellyfin:
         self.url = url.rstrip("/")
         self.s = requests.Session()
         self.s.headers["Authorization"] = (
-            f'MediaBrowser Token="{api_key}", Client="jellyfin-music-audit", '
-            f'Device="script", DeviceId="jellyfin-music-audit", Version="{VERSION}"')
+            f'MediaBrowser Token="{api_key}", Client="polyhymnia", '
+            f'Device="script", DeviceId="polyhymnia", Version="{VERSION}"')
         self.user_id = self._resolve_user(user)
 
     def _req(self, method, path, **kw):
@@ -320,7 +321,7 @@ class MusicBrainz:
 
     def __init__(self, contact, cache_path):
         self.s = requests.Session()
-        self.s.headers["User-Agent"] = f"jellyfin-music-audit/{VERSION} ( {contact} )"
+        self.s.headers["User-Agent"] = f"polyhymnia/{VERSION} ( {contact} )"
         self.s.headers["Accept"] = "application/json"
         self.cache_path, self.cache, self._last, self._dirty = cache_path, {}, 0.0, 0
         if cache_path and os.path.exists(cache_path):
@@ -777,7 +778,7 @@ def cmd_audit(args):
         review_path = os.path.splitext(args.output)[0] + "_covers.html"
         write_cover_review(review_path, cover_review)
         print(f"Side-by-side cover comparison: {review_path}")
-    print(f"Review it, then: python {os.path.basename(sys.argv[0])} apply {args.output}")
+    print(f"Review it, then: jfa apply {args.output}")
 
 
 # --------------------------------------------------------------------------- writing to Jellyfin
@@ -924,7 +925,7 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
             print(f"FAILED {dto.get('Name')!r}: {e}")
 
     http = requests.Session()
-    http.headers["User-Agent"] = f"jellyfin-music-audit/{VERSION} ( {args.contact} )"
+    http.headers["User-Agent"] = f"polyhymnia/{VERSION} ( {args.contact} )"
     for aid, spec in planned_covers:
         try:
             data, ctype = fetch_cover(http, spec["src"])
@@ -937,7 +938,7 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
             failed += 1
             print(f"FAILED cover for {spec.get('label', aid)}: {e}")
     print(f"Done: {ok} updated, {failed} failed. Undo with: "
-          f"python {os.path.basename(sys.argv[0])} restore {backup_path} --commit")
+          f"jfa restore {backup_path} --commit")
 
 
 def cmd_apply(args):
@@ -1340,7 +1341,7 @@ def cmd_lock_names(args):
             print(f"FAILED {dto.get('Name')!r}: {e}")
         if i % 500 == 0:
             print(f"  locked {i}/{len(planned)}{eta_text(started, i, len(planned))}", file=sys.stderr, flush=True)
-    print(f"Done: {ok} locked, {failed} failed. Undo with: python {os.path.basename(sys.argv[0])} restore {backup_path} --commit")
+    print(f"Done: {ok} locked, {failed} failed. Undo with: jfa restore {backup_path} --commit")
 
 
 def cmd_import_names(args):
@@ -1535,7 +1536,7 @@ def cmd_covers_fetch(args):
     entries = list(index.values())
     print(f"\n{len(entries)} albums in {args.dir}/: {sum(1 for e in entries if e['new'])} with a cover found online, "
           f"{sum(1 for e in entries if not e['current'])} without a current cover, {errors} errors this run.")
-    print(f"Next: python {os.path.basename(sys.argv[0])} covers-review   (then open the page in your browser)")
+    print(f"Next: jfa covers-review   (then open the page in your browser)")
 
 
 PICKER_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -1680,7 +1681,7 @@ def cmd_covers_review(args):
     except KeyboardInterrupt:
         pass
     print(f"\nStopped. {len(choices)} album(s) set to get the new cover. "
-          f"Next: python {os.path.basename(sys.argv[0])} covers-apply")
+          f"Next: jfa covers-apply")
 
 
 def cmd_covers_apply(args):
