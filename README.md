@@ -11,7 +11,7 @@ every change is shown as a dry run first, backed up before it is written, and ca
 ## Setup (once per server)
 
 ```sh
-git clone https://git.home.arpa/bob/polyhymnia.git
+git clone https://git.home.arpa/horia/polyhymnia.git
 cd polyhymnia
 chmod +x jfa
 cp .env.example .env
