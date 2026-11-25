@@ -1,0 +1,30 @@
+#!/bin/sh
+# jfa - run the Jellyfin music audit tool in Docker.
+# Run it from the folder that holds your data (exports, edited files, backups, covers):
+#   cd data && ../jfa check-names jellyfin_names_part0*_edited.json
+#   ../jfa bg covers-fetch       runs in the background and survives logging out
+set -e
+repo=$(cd "$(dirname "$0")" && pwd)
+if [ "$PWD" = "$repo" ]; then
+    mkdir -p "$repo/data"
+    echo "Run jfa from your data folder, for example:  cd data && ../jfa $*" >&2
+    exit 1
+fi
+if [ ! -f "$repo/.env" ]; then
+    echo "Missing $repo/.env - copy .env.example to .env and fill it in." >&2
+    exit 1
+fi
+export WORK="$PWD"
+compose() { docker compose --project-directory "$repo" -f "$repo/compose.yaml" "$@"; }
+compose build --quiet
+if [ "${1:-}" = "bg" ]; then
+    shift
+    name="jfa-${1:-job}"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    compose run -d --name "$name" audit "$@" >/dev/null
+    echo "Started in the background as $name."
+    echo "Progress:  docker logs --tail 3 $name"
+    echo "When done: docker rm $name"
+    exit 0
+fi
+compose run --rm audit "$@"

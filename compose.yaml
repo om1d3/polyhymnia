@@ -1,0 +1,11 @@
+# Used by the jfa wrapper. The folder you run jfa from is mounted as /work,
+# so exports, edited files, backups and covers stay next to you, not in the repo.
+services:
+  audit:
+    build: .
+    image: jellyfin-music-audit:local
+    network_mode: host
+    env_file: .env
+    user: "${PUID:-0}:${PGID:-0}"
+    volumes:
+      - ${WORK:?run jfa from your data folder}:/work
