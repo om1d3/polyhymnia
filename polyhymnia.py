@@ -5,6 +5,7 @@ The name comes from the Muse of sacred song.
 
 Names (album names, album artists, track titles and track artists)
   export-names   Write the names to JSON files. You can then edit copies of these files.
+                 With --new, export only the albums that are not in an edited file.
   import-names   Compare the original file with the edited copy. Write only the changes to Jellyfin.
                  If a value in Jellyfin changed after the export, Polyhymnia does not change it.
   check-names    Compare Jellyfin with the edited files. With --fix, correct the differences.
@@ -25,6 +26,7 @@ Safety
 
 Examples (jfa is the Docker wrapper)
   jfa export-names --split 250
+  jfa export-names --new
   jfa import-names jellyfin_names_part01.json jellyfin_names_part01_edited.json
   jfa check-names jellyfin_names_part0*_edited.json
   jfa covers-fetch
@@ -1018,9 +1020,39 @@ def _write_names(path, header, albums):
         f.write(text)
 
 
+def known_album_ids():
+    """Return the IDs of the albums in all edited files (*_edited.json) in this folder."""
+    known, files = set(), 0
+    for f in sorted(glob.glob("*_edited.json")):
+        try:
+            with open(f, encoding="utf-8-sig") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if doc.get("format") == NAMES_FORMAT:
+            files += 1
+            known |= {a["id"] for a in doc.get("albums", []) if a.get("id")}
+    return known, files
+
+
 def cmd_export_names(args):
     jf = make_jf(args)
     albums, lib = select_albums(jf, args)
+    if args.new:
+        known, files = known_album_ids()
+        print(f"Polyhymnia compares Jellyfin with the edited files in this folder. Edited files: {files}. "
+              f"Albums in them: {len(known)}.", file=sys.stderr)
+        albums = [a for a in albums if a["Id"] not in known]
+        if not albums:
+            print("There are no new albums. Each album is in an edited file in this folder.")
+            return
+        print(f"New albums: {len(albums)}")
+        for a in albums[:40]:
+            print(f"  {'; '.join(album_artist_names(a)) or '?'} - {a.get('Name')}")
+        if len(albums) > 40:
+            print(f"  ... and {len(albums) - 40} more albums")
+        if args.output == "jellyfin_names.json":
+            args.output = f"new_albums_{datetime.now():%Y%m%d-%H%M}.json"
     wanted = {a["Id"] for a in albums}
     by_album = defaultdict(list)
     params = dict(IncludeItemTypes="Audio", Recursive="true", Fields="ParentId", SortBy="SortName")
@@ -1767,6 +1799,9 @@ def main():
                         help="write album names, artists and track titles to JSON files that you can edit")
     en.add_argument("-o", "--output", default="jellyfin_names.json")
     en.add_argument("--split", type=int, metavar="N", help="N albums in each file (for example 250). Smaller files are easier to examine.")
+    en.add_argument("--new", action="store_true",
+                    help="export only the albums that are not in an edited file (*_edited.json) in this folder. "
+                         "The default file name is new_albums_<date>-<time>.json")
     en.set_defaults(func=cmd_export_names)
 
     im = sub.add_parser("import-names", parents=[common, writing],

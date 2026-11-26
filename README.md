@@ -146,6 +146,51 @@ Use this procedure for album names, album artists, track titles and track artist
 
 Polyhymnia also locks each name that it changes.
 
+## Add new albums
+
+Use this procedure after you add one or more albums to your music folder. Polyhymnia changes only the new albums.
+An album is new until it is in an edited file (`*_edited.json`) in the data folder.
+
+1. In Jellyfin, start a library scan. Wait until the scan is complete.
+2. Go to the data folder.
+3. Export the new albums:
+
+   ```sh
+   ../jfa export-names --new
+   ```
+
+   Result: the list shows the new albums. Polyhymnia writes them to a file with the name `new_albums_<date>-<time>.json`.
+
+4. Make a copy of the file. Add `_edited` to the name of the copy. Example: `new_albums_20261126-0900_edited.json`.
+5. Edit the copy. Do not change the `id` values.
+6. Do a dry run:
+
+   ```sh
+   ../jfa import-names new_albums_20261126-0900.json new_albums_20261126-0900_edited.json
+   ```
+
+7. Read the list of changes. Then write the changes. Use the same command and add `--commit`.
+8. Lock the names of the new albums:
+
+   ```sh
+   ../jfa lock-names new_albums_20261126-0900_edited.json --commit
+   ```
+
+9. Download the covers of the new albums. Polyhymnia downloads only the albums that it does not know:
+
+   ```sh
+   ../jfa bg covers-fetch
+   ```
+
+10. Select and upload the covers. Do steps 2 to 7 of "Select new covers".
+11. Examine all names. This command uses all edited files in the data folder:
+
+    ```sh
+    ../jfa check-names *_edited.json
+    ```
+
+Keep the export and its edited file in the data folder. `--new` and `check-names` use them.
+
 ## Examine the names and correct the differences
 
 `check-names` compares Jellyfin with your edited files. Without `--fix`, it does not change data.
