@@ -318,6 +318,13 @@ The next command builds the Docker image again.
 | An album keeps an incorrect cover. The new cover is the same image. | The MusicBrainz ID in the music files is for a different release. | Use `covers-fetch --album "name" --refetch --search`. Then select the cover again. |
 | "Do not use jfa in the program folder". | You started `jfa` in the program folder. | Go to your data folder. Start the command again. |
 
+## Other files
+
+| File | Contents |
+|---|---|
+| `docs/HANDOVER.md` | The state of the project and the rules for the names. Use it to continue the work in a new conversation with an assistant. |
+| `tools/editor/` | The tool that edits export files in the style of the library. For the procedure, see `tools/editor/README.md`. |
+
 ## ⚠️ Provenance and honesty disclaimer
 
 This project is "vibe-coded". A human operator and Claude, the AI assistant from Anthropic, wrote it together. They changed the code again and again until it operated correctly.
