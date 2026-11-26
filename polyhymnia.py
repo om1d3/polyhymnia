@@ -428,11 +428,11 @@ def album_artist_names(album):
     return names or ([album["AlbumArtist"]] if album.get("AlbumArtist") else [])
 
 
-def find_release(mb, album, tracks):
+def find_release(mb, album, tracks, search=False):
     """Find the MusicBrainz release for a Jellyfin album: first the stored MBID, then a search. Return (release, confidence)."""
     name, artists = album.get("Name") or "", album_artist_names(album)
     pids = album.get("ProviderIds") or {}
-    if pids.get("MusicBrainzAlbum"):
+    if pids.get("MusicBrainzAlbum") and not search:      # with search=True, ignore the ID in the files
         release = mb.release(pids["MusicBrainzAlbum"])
         if release:
             return release, "mbid"
@@ -1463,7 +1463,7 @@ def save_cover(folder, stem, data, ctype):
     return info
 
 
-def fetch_album_covers(jf, mb, http, album, root):
+def fetch_album_covers(jf, mb, http, album, root, search=False):
     aid = album["Id"]
     folder = os.path.join(root, aid)
     os.makedirs(folder, exist_ok=True)
@@ -1477,7 +1477,7 @@ def fetch_album_covers(jf, mb, http, album, root):
             entry["current"] = save_cover(folder, "current", data, ctype)
         else:
             entry["image_tag"] = None
-    release, conf = find_release(mb, album, jf.tracks(aid))
+    release, conf = find_release(mb, album, jf.tracks(aid), search)
     if release:
         entry.update(release=release["id"], confidence=conf, release_title=release.get("title"),
                      release_artist=credit_string(release.get("artist-credit")))
@@ -1521,7 +1521,7 @@ def cmd_covers_fetch(args):
             print(f"[{i}/{len(todo)}] {album.get('AlbumArtist') or '?'} - {album.get('Name')}"
                   f"{eta_text(started, i - 1, len(todo))}", file=sys.stderr, flush=True)
             try:
-                index[album["Id"]] = fetch_album_covers(jf, mb, http, album, args.dir)
+                index[album["Id"]] = fetch_album_covers(jf, mb, http, album, args.dir, args.search)
             except Exception as e:   # not stored: the next run tries this album again
                 errors += 1
                 print(f"   ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -1792,6 +1792,8 @@ def main():
                         help="download the current cover and the best online cover for each album")
     cf.add_argument("--dir", default="covers", help="folder for the images (default: covers)")
     cf.add_argument("--refetch", action="store_true", help="download all albums again, also the albums from an earlier run")
+    cf.add_argument("--search", action="store_true",
+                    help="ignore the MusicBrainz IDs in the music files. Find each album by its name and artist")
     cf.add_argument("--cache", default=".musicbrainz_cache.json", help="MusicBrainz cache file (use '' for no cache)")
     cf.set_defaults(func=cmd_covers_fetch)
 

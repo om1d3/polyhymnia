@@ -222,6 +222,14 @@ CAUTION: Do not use "Refresh metadata" with "Replace all metadata" in Jellyfin. 
    ```
 
 If you do not click the new cover, the album keeps its current cover.
+
+If the new cover is the same incorrect image as the current cover, the MusicBrainz ID in the music files
+is for a different release. In this condition, download the covers again with `--search`.
+Polyhymnia then ignores the IDs and finds each album by its name. Example:
+
+```sh
+../jfa covers-fetch --album "Depeche" --refetch --search
+```
 The picker shows the current cover and the new cover next to each other (example with demo albums):
 
 ![Cover picker](docs/cover-picker.png)
@@ -262,4 +270,5 @@ The next command builds the Docker image again.
 | An artist page has the name of a different artist. | The online search of Jellyfin used an incorrect name. | Use `check-names --fix`. It restores the name and locks it. |
 | "Jellyfin did not accept the API key (401)". | The API key in `.env` is not correct. | Write the correct API key in `.env`. |
 | "function not implemented" for each command (TrueNAS). | The root shell lost its sudo session. | Close the shell. Start `screen` as your normal user, then use `sudo -i` in `screen`. |
+| An album keeps an incorrect cover. The new cover is the same image. | The MusicBrainz ID in the music files is for a different release. | Use `covers-fetch --album "name" --refetch --search`. Then select the cover again. |
 | "Do not use jfa in the program folder". | You started `jfa` in the program folder. | Go to your data folder. Start the command again. |
