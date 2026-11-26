@@ -317,3 +317,19 @@ The next command builds the Docker image again.
 | "function not implemented" for each command (TrueNAS). | The root shell lost its sudo session. | Close the shell. Start `screen` as your normal user, then use `sudo -i` in `screen`. |
 | An album keeps an incorrect cover. The new cover is the same image. | The MusicBrainz ID in the music files is for a different release. | Use `covers-fetch --album "name" --refetch --search`. Then select the cover again. |
 | "Do not use jfa in the program folder". | You started `jfa` in the program folder. | Go to your data folder. Start the command again. |
+
+## ⚠️ Provenance and honesty disclaimer
+
+This project is "vibe-coded". A human operator and Claude, the AI assistant from Anthropic, wrote it together. They changed the code again and again until it operated correctly.
+
+Nobody did a formal review or an audit of the code. The repository has no test suite. During the development, Claude did tests with a simulated Jellyfin server. The human operator used Polyhymnia on one real library with 1,053 albums and 16,479 tracks.
+
+Thus, examine each dry run carefully before you use `--commit`. Many special conditions in the code come from problems in that one library, not from a plan. Use Polyhymnia at your own risk. Issues and pull requests are welcome. This is the purpose of the publication.
+
+**Non-affiliation:** This project is not affiliated with Jellyfin, the MetaBrainz Foundation (MusicBrainz and the Cover Art Archive) or the Internet Archive. These organizations do not endorse it. Polyhymnia uses the free MusicBrainz API and the Cover Art Archive. These services limit the number of requests. They can change or stop their services at any time. Polyhymnia also uses the Jellyfin API, which can change in a new Jellyfin version. These dependencies are the largest operational risk of this project.
+
+**Content note:** Album covers are protected by copyright. Use the downloaded covers only for your own library. You are responsible for the use of the data.
+
+## License
+
+MIT. You can use, change and share this project. For the full text, see the file [LICENSE](LICENSE).
