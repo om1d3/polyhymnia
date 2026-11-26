@@ -1,5 +1,5 @@
-# Used by the jfa wrapper. The folder you run jfa from is mounted as /work,
-# so exports, edited files, backups and covers stay next to you, not in the repo.
+# The jfa wrapper uses this file. The folder where you start jfa becomes /work in the container.
+# Thus, exports, edited files, backups and covers stay in your data folder, not in the program folder.
 services:
   audit:
     build: .
@@ -8,4 +8,4 @@ services:
     env_file: .env
     user: "${PUID:-0}:${PGID:-0}"
     volumes:
-      - ${WORK:?run jfa from your data folder}:/work
+      - ${WORK:?start jfa in your data folder}:/work

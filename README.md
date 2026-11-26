@@ -2,85 +2,264 @@
 
 # Polyhymnia
 
-*Named after the Muse of sacred song, keeper of many hymns.*
+Polyhymnia examines and corrects the music data in a Jellyfin library.
+It corrects album names, track titles, artist names and covers.
+The name comes from Polyhymnia, the Muse of sacred song.
 
-Polyhymnia checks and fixes the names, artists and covers of a Jellyfin music library, safely:
-every change is shown as a dry run first, backed up before it is written, and can be undone.
+This document uses ASD-STE100 Simplified Technical English.
+
+## Safety
+
+- A command that writes data always does a dry run first. A dry run shows the changes and does not write them.
+- Before Polyhymnia writes data, it makes a backup. You can restore the initial values from this backup.
+- Polyhymnia does not change a value if somebody changed it in Jellyfin after the export.
+
+## Terms
+
+| Term | Definition |
+|---|---|
+| Dry run | A command without `--commit`. It shows the changes. It does not write them. |
+| `--commit` | The option that writes the changes to Jellyfin. |
+| Program folder | The folder with the Polyhymnia files from git. |
+| Data folder | The folder with your data: exports, edited files, backups and covers. Start all commands in this folder. |
+| Export | A JSON file from `export-names`. It contains the names that are in Jellyfin. Do not change this file. |
+| Edited file | A copy of an export, with your changes. Its name ends with `_edited.json`. |
+| Backup | A JSON file with the initial values. Polyhymnia writes a backup before each change. |
+| Artist page | The Jellyfin page for one artist. Jellyfin shows an artist name only if it has an artist page. |
+| Library scan | A Jellyfin task that reads the music files again. It also makes the artist pages. |
+| Lock | A Jellyfin protection for a name. A library scan cannot change a locked name. |
 
 ## Requirements
 
-- A Linux server with Docker and the Docker Compose plugin (`docker compose version` works)
-- A Jellyfin API key (Jellyfin: Dashboard → API Keys → +)
+- A Linux server with Docker and the Docker Compose plugin. To examine this, use `docker compose version`.
+- A Jellyfin API key. To make an API key, go to Jellyfin > Dashboard > API Keys, and click **+**.
 
-## Setup (once per server)
+## Install Polyhymnia
 
-```sh
-git clone https://git.home.arpa/horia/polyhymnia.git
-cd polyhymnia
-chmod +x jfa
-cp .env.example .env
-nano .env
-mkdir -p data
-```
+Do these steps one time on each server.
 
-In `.env`, fill in `JELLYFIN_URL`, `JELLYFIN_API_KEY` and `MB_CONTACT` (your email address).
+1. Copy the program folder from git:
 
-## Running it
+   ```sh
+   git clone https://git.home.arpa/horia/polyhymnia.git
+   ```
 
-Always run `jfa` from the folder that holds your data. That folder is where exports,
-edited files, backups and downloaded covers are kept:
+2. Go to the program folder:
 
-```sh
-cd data
-../jfa check-names jellyfin_names_part0*_edited.json
-```
+   ```sh
+   cd polyhymnia
+   ```
 
-Long jobs can run in the background, so they survive logging out:
+3. Make the wrapper executable:
 
-```sh
-../jfa bg covers-fetch
-docker logs --tail 3 jfa-covers-fetch
-docker rm jfa-covers-fetch
-```
+   ```sh
+   chmod +x jfa
+   ```
 
-The Docker image is built automatically on the first run, and rebuilt after a `git pull`.
+4. Make the settings file:
 
-## Workflows
+   ```sh
+   cp .env.example .env
+   ```
 
-**Names** (album names, album artists, track titles, track artists)
+5. Open the settings file:
 
-| Step | Command |
-|---|---|
-| 1. Export | `../jfa export-names --split 250` |
-| 2. Edit | Edit a copy of each file and name it `…_edited.json` (keep the originals) |
-| 3. Dry run | `../jfa import-names jellyfin_names_part01.json jellyfin_names_part01_edited.json` |
-| 4. Apply | the same command with `--commit` |
-| 5. Check | `../jfa check-names jellyfin_names_part0*_edited.json` |
-| 6. Repair | `../jfa check-names jellyfin_names_part0*_edited.json --fix`, then the same with `--commit` |
-| 7. Protect | `../jfa lock-names jellyfin_names_part0*_edited.json`, then the same with `--commit` |
+   ```sh
+   nano .env
+   ```
 
-**Covers**
+6. Write your values for `JELLYFIN_URL`, `JELLYFIN_API_KEY` and `MB_CONTACT` (your email address). Save the file.
 
-| Step | Command |
-|---|---|
-| 1. Download | `../jfa bg covers-fetch` (current covers are saved at full quality first) |
-| 2. Pick | `../jfa covers-review`, then open `http://SERVER-IP:8765` in a browser; Ctrl+C when done |
-| 3. Dry run | `../jfa covers-apply` |
-| 4. Apply | `../jfa covers-apply --commit` |
+7. Make the data folder:
 
-The cover picker shows the current and the new cover side by side; every album keeps its
-current cover unless you click the new one (demo albums shown):
+   ```sh
+   mkdir -p data
+   ```
+
+## Start a command
+
+Always start the commands in your data folder. Polyhymnia writes all its files to this folder.
+
+1. Go to the data folder:
+
+   ```sh
+   cd data
+   ```
+
+2. Start the command with `../jfa`. Example:
+
+   ```sh
+   ../jfa check-names jellyfin_names_part0*_edited.json
+   ```
+
+The first command builds the Docker image. This takes approximately one minute.
+After `git pull`, the next command builds the image again.
+
+### Start a long command in the background
+
+A command in the background continues when you close the session.
+
+1. Put `bg` before the command name:
+
+   ```sh
+   ../jfa bg covers-fetch
+   ```
+
+2. To see the progress, use:
+
+   ```sh
+   docker logs --tail 3 jfa-covers-fetch
+   ```
+
+3. When the last line shows the result, remove the stopped container:
+
+   ```sh
+   docker rm jfa-covers-fetch
+   ```
+
+## Correct the names
+
+Use this procedure for album names, album artists, track titles and track artists.
+
+1. Export the names to JSON files with 250 albums in each file:
+
+   ```sh
+   ../jfa export-names --split 250
+   ```
+
+2. Make a copy of each file. Add `_edited` to the name of the copy. Example: `jellyfin_names_part01_edited.json`.
+3. Edit the copies. Do not change the original files. Do not change the `id` values.
+4. Do a dry run for each file. Example:
+
+   ```sh
+   ../jfa import-names jellyfin_names_part01.json jellyfin_names_part01_edited.json
+   ```
+
+5. Read the list of changes. Make sure that each change is correct.
+6. Write the changes. Use the same command and add `--commit`:
+
+   ```sh
+   ../jfa import-names jellyfin_names_part01.json jellyfin_names_part01_edited.json --commit
+   ```
+
+7. Do steps 4 to 6 for each file.
+
+Polyhymnia also locks each name that it changes.
+
+## Examine the names and correct the differences
+
+`check-names` compares Jellyfin with your edited files. Without `--fix`, it does not change data.
+
+1. Examine the names:
+
+   ```sh
+   ../jfa check-names jellyfin_names_part0*_edited.json
+   ```
+
+2. Read the summary at the top. If all lines show "correct", stop here.
+3. Do a dry run of the corrections:
+
+   ```sh
+   ../jfa check-names jellyfin_names_part0*_edited.json --fix
+   ```
+
+4. Read the section "Plan for --fix". Make sure that each change is correct.
+5. Write the corrections:
+
+   ```sh
+   ../jfa check-names jellyfin_names_part0*_edited.json --fix --commit
+   ```
+
+6. If the report shows names without an artist page, start a library scan in Jellyfin. Then do step 1 again.
+
+Keep the original exports next to the edited files. `check-names` uses them to find the artist names that an edit replaced.
+
+## Lock all names
+
+A library scan can change names that are not locked. Do this procedure to protect all names.
+
+1. Do a dry run:
+
+   ```sh
+   ../jfa lock-names jellyfin_names_part0*_edited.json
+   ```
+
+2. Lock the names in the background. This takes 30 to 60 minutes for a large library:
+
+   ```sh
+   ../jfa bg lock-names jellyfin_names_part0*_edited.json --commit
+   ```
+
+CAUTION: Do not use "Refresh metadata" with "Replace all metadata" in Jellyfin. This action reads all music files again. It can change the artists of your albums.
+
+## Select new covers
+
+1. Download the current covers and the new covers in the background:
+
+   ```sh
+   ../jfa bg covers-fetch
+   ```
+
+2. When the download is complete, start the cover picker:
+
+   ```sh
+   ../jfa covers-review
+   ```
+
+3. In your browser, open `http://SERVER-IP:8765`.
+4. For each album, click the cover to use. Polyhymnia saves each selection immediately.
+5. When you have completed the selection, press Ctrl+C in the terminal.
+6. Do a dry run:
+
+   ```sh
+   ../jfa covers-apply
+   ```
+
+7. Upload the selected covers:
+
+   ```sh
+   ../jfa covers-apply --commit
+   ```
+
+If you do not click the new cover, the album keeps its current cover.
+The picker shows the current cover and the new cover next to each other (example with demo albums):
 
 ![Cover picker](docs/cover-picker.png)
 
-**Undo**: every write prints a backup file name. `../jfa restore backup-….json --commit` puts it back.
+## Restore the initial values
 
-## Good to know
+Each command that writes data shows the name of its backup file.
 
-- Nothing is written without `--commit`.
-- `check-names` is read-only unless you add `--fix --commit`. Keep the original exports next to the
-  edited files: `check-names` uses them to tell replaced artist names from extra ones in your files.
-- A library scan creates missing artist pages. If Jellyfin renames an artist page itself (its online
-  lookup can confuse artists), `check-names --fix` renames it back and locks the name.
-- On TrueNAS: start `screen` as your normal user and run `sudo -i` inside it. A root shell started
-  before `screen` stops being able to run programs once you log out.
+1. Do a dry run:
+
+   ```sh
+   ../jfa restore backup-20261125-102105.json
+   ```
+
+2. Restore the values:
+
+   ```sh
+   ../jfa restore backup-20261125-102105.json --commit
+   ```
+
+## Update Polyhymnia
+
+1. Go to the program folder.
+2. Download the new version:
+
+   ```sh
+   git pull
+   ```
+
+The next command builds the Docker image again.
+
+## Problems and solutions
+
+| Problem | Cause | Action |
+|---|---|---|
+| A line starts with "NOT CHANGED". | The value in Jellyfin changed after the export. | Examine the value in Jellyfin. If necessary, make a new export. |
+| Jellyfin does not show an artist name on an album. | The name has no artist page. | Start a library scan in Jellyfin. Then use `check-names` again. |
+| An artist page has the name of a different artist. | The online search of Jellyfin used an incorrect name. | Use `check-names --fix`. It restores the name and locks it. |
+| "Jellyfin did not accept the API key (401)". | The API key in `.env` is not correct. | Write the correct API key in `.env`. |
+| "function not implemented" for each command (TrueNAS). | The root shell lost its sudo session. | Close the shell. Start `screen` as your normal user, then use `sudo -i` in `screen`. |
+| "Do not use jfa in the program folder". | You started `jfa` in the program folder. | Go to your data folder. Start the command again. |

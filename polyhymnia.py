@@ -1,39 +1,35 @@
 #!/usr/bin/env python3
 """
-Polyhymnia - check and fix Jellyfin music metadata and covers, safely.
-(Named after the Muse of sacred song.)
+Polyhymnia examines and corrects the music data in Jellyfin: names, artists and covers.
+The name comes from the Muse of sacred song.
 
-Names: edit them yourself (or have someone review them) as JSON
-  export-names   Write album names, album artists, track titles and track artists to JSON.
-  import-names   Compare the original export with your edited copy and change only what
-                 you edited. Skips anything that was changed in Jellyfin since the export.
+Names (album names, album artists, track titles and track artists)
+  export-names   Write the names to JSON files. You can then edit copies of these files.
+  import-names   Compare the original file with the edited copy. Write only the changes to Jellyfin.
+                 If a value in Jellyfin changed after the export, Polyhymnia does not change it.
+  check-names    Compare Jellyfin with the edited files. With --fix, correct the differences.
+  lock-names     Lock all names, so that a library scan cannot change them.
 
-Covers: pick per album in your browser
-  covers-fetch   Save every current cover at full quality and download the best front
-                 cover from the Cover Art Archive (resumable; run it in screen).
-  covers-review  Web page showing current and new cover side by side. Nothing is
-                 chosen until you click; choices are saved as you go.
-  covers-apply   Upload only the covers you picked.
+Covers
+  covers-fetch   Save each current cover. Download the best front cover from the Cover Art Archive.
+  covers-review  Show a web page with the current cover and the new cover for each album.
+  covers-apply   Upload the covers that you selected on the web page.
 
 Report against MusicBrainz
-  audit / apply  CSV of differences with MusicBrainz, then push the rows you approve.
+  audit, apply   Write a CSV report of differences. Then write the approved rows to Jellyfin.
 
-Every writing command is a dry run unless --commit is given, and backs up what it
-changes first; "restore <backup> --commit" puts it back.
+Safety
+  A command that writes data does a dry run first. A dry run shows the changes and does not
+  write them. Add --commit to write the changes. Before Polyhymnia writes, it makes a backup.
+  To restore the initial values, use: restore <backup file> --commit
 
-Setup
-  pip install requests pillow
-  export JELLYFIN_URL=http://192.168.1.10:8096
-  export JELLYFIN_API_KEY=xxxxxxxx     (Dashboard > API Keys)
-  export MB_CONTACT=you@example.com    (MusicBrainz asks for contact info in the User-Agent)
-
-Examples
+Examples (jfa is the Docker wrapper)
   jfa export-names --split 250
-  jfa import-names jellyfin_names_part01.json part01_edited.json
+  jfa import-names jellyfin_names_part01.json jellyfin_names_part01_edited.json
+  jfa check-names jellyfin_names_part0*_edited.json
   jfa covers-fetch
   jfa covers-review --port 8765
   jfa covers-apply --commit
-  jfa audit --compare-covers --sentence-case track
 """
 import argparse
 import base64
@@ -58,7 +54,7 @@ from urllib.parse import quote, urlencode
 try:
     import requests
 except ImportError:
-    sys.exit("This script needs the requests package: pip install requests")
+    sys.exit("Polyhymnia uses the requests package. Install it with: pip install requests")
 
 VERSION = "1.1"
 CSV_COLUMNS = ["approve", "field", "severity", "confidence", "album_artist", "album",
@@ -80,7 +76,7 @@ _PUNCT = str.maketrans({
 
 
 def straighten(s):
-    """Typographic quotes/dashes (MusicBrainz style) -> plain ASCII."""
+    """Change typographic quotes and dashes (MusicBrainz style) to plain ASCII."""
     return (s or "").translate(_PUNCT)
 
 
@@ -101,7 +97,7 @@ def sim(a, b):
 
 
 def classify(current, proposed):
-    """None if identical, otherwise 'missing', 'cosmetic' (case/punctuation) or 'mismatch'."""
+    """Return None if the values are the same. Else return 'missing', 'cosmetic' (capitals or punctuation) or 'mismatch'."""
     current, proposed = current or "", proposed or ""
     if current == proposed:
         return None
@@ -123,15 +119,15 @@ def credit_string(ac):
 # --------------------------------------------------------------------------- sentence case
 
 NO_BREAK_ABBR = {"feat", "ft", "vs", "vol", "no", "nr", "pt", "op", "ca", "aka"}
-NAMES_FOLLOW = {"feat", "ft", "featuring", "vs"}   # what comes after these is artist names
+NAMES_FOLLOW = {"feat", "ft", "featuring", "vs"}   # after these words, the text contains artist names
 SHOUT_ROMAN = re.compile(r"^(?=[IVX]{2,5}$)(X{0,3})(IX|IV|V?I{0,3})$")
 
 
 def load_keep(path, explicit):
-    """Words/phrases from keep_caps.txt that always keep the spelling written in the file."""
+    """Read the words and phrases in keep_caps.txt. They keep the capitals from the file."""
     if not os.path.exists(path):
         if explicit:
-            sys.exit(f"Keep-capitals file {path!r} not found.")
+            sys.exit(f"Cannot find the keep-capitals file {path!r}.")
         return []
     with open(path, encoding="utf-8-sig") as f:
         words = {ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")}
@@ -140,7 +136,7 @@ def load_keep(path, explicit):
 
 
 def _case_core(core, start, shouting, trail):
-    if re.fullmatch(r"I(['’]\w+)?", core):  # English "I", "I'm" - never touch an existing capital I
+    if re.fullmatch(r"I(['’]\w+)?", core):  # English "I" and "I'm": do not change a capital I
         return core
     if shouting:
         if SHOUT_ROMAN.match(core):
@@ -159,7 +155,7 @@ def _case_core(core, start, shouting, trail):
 
 
 def sentence_case(text, keep=()):
-    """'Wake Me Up When September Ends' -> 'Wake me up when September ends' (with September kept)."""
+    """Example: 'Wake Me Up When September Ends' becomes 'Wake me up when September ends'."""
     if not text:
         return text or ""
     letters = [c for c in text if c.isalpha()]
@@ -203,7 +199,7 @@ class Jellyfin:
     def _req(self, method, path, **kw):
         r = self.s.request(method, self.url + path, timeout=120, **kw)
         if r.status_code == 401:
-            sys.exit("Jellyfin returned 401 Unauthorized - check JELLYFIN_API_KEY.")
+            sys.exit("Jellyfin did not accept the API key (401). Make sure that JELLYFIN_API_KEY is correct.")
         if not r.ok:
             raise RuntimeError(f"Jellyfin {method} {path} -> HTTP {r.status_code}: {r.text[:300]}")
         return r
@@ -214,12 +210,12 @@ class Jellyfin:
     def _resolve_user(self, name):
         users = self.get("/Users")
         if not users:
-            sys.exit("Jellyfin returned no users.")
+            sys.exit("Jellyfin did not send a list of users.")
         if name:
             for u in users:
                 if u["Name"].casefold() == name.casefold():
                     return u["Id"]
-            sys.exit(f"No Jellyfin user named {name!r}.")
+            sys.exit(f"Cannot find the Jellyfin user {name!r}.")
         for u in users:
             if (u.get("Policy") or {}).get("IsAdministrator"):
                 return u["Id"]
@@ -231,7 +227,7 @@ class Jellyfin:
         for v in music:
             if v["Name"].casefold() == name.casefold():
                 return v["Id"]
-        sys.exit(f"No music library named {name!r}. Found: {', '.join(v['Name'] for v in music) or 'none'}")
+        sys.exit(f"Cannot find the music library {name!r}. Music libraries: {', '.join(v['Name'] for v in music) or 'none'}")
 
     def _items(self, **params):
         start = 0
@@ -263,7 +259,7 @@ class Jellyfin:
         return self.get(f"/Items/{item_id}", userId=self.user_id)
 
     def artist_pages(self):
-        """id -> name of every artist page Jellyfin has (performers and album artists)."""
+        """Return the ID and the name of each artist page in Jellyfin (performers and album artists)."""
         pages = {}
         for path in ("/Artists", "/Artists/AlbumArtists"):
             start = 0
@@ -279,7 +275,7 @@ class Jellyfin:
         return pages
 
     def artist(self, name):
-        """The artist entry Jellyfin keeps for this name, or None."""
+        """Return the artist page that Jellyfin has for this name, or None."""
         try:
             r = self.s.get(f"{self.url}/Artists/{quote(name, safe='')}", params={"userId": self.user_id}, timeout=60)
         except requests.RequestException:
@@ -287,7 +283,7 @@ class Jellyfin:
         return r.json() if r.ok else None
 
     def update_item(self, dto):
-        # Jellyfin wants the complete item back, so always GET -> modify -> POST.
+        # Jellyfin accepts only the complete item. Thus, read it (GET), change it, then write it (POST).
         self._req("POST", f"/Items/{dto['Id']}", json=dto)
 
     def image(self, item_id, max_width=None):
@@ -302,7 +298,7 @@ class Jellyfin:
 
     def set_image(self, item_id, data, content_type):
         if content_type in ("image/jpg", "image/pjpeg"):
-            content_type = "image/jpeg"  # Jellyfin rejects image/jpg
+            content_type = "image/jpeg"  # Jellyfin does not accept image/jpg
         self._req("POST", f"/Items/{item_id}/Images/Primary",
                   data=base64.b64encode(data), headers={"Content-Type": content_type})
 
@@ -335,7 +331,7 @@ class MusicBrainz:
             return self.cache[key]
         data = None
         for attempt in range(6):
-            wait = 1.1 - (time.monotonic() - self._last)  # MusicBrainz allows ~1 request/second
+            wait = 1.1 - (time.monotonic() - self._last)  # MusicBrainz permits approximately 1 request each second
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
@@ -353,7 +349,7 @@ class MusicBrainz:
             data = r.json()
             break
         else:
-            raise RuntimeError(f"MusicBrainz kept refusing {path}")
+            raise RuntimeError(f"MusicBrainz did not accept the request {path} after 6 attempts")
         self.cache[key] = data
         self._dirty += 1
         if self._dirty >= 20:
@@ -391,7 +387,7 @@ def _candidate_track_count(rel):
 
 
 def pick_release(mb, title, artist, track_count, track_titles, rg_id=None):
-    """Return the best-scoring MusicBrainz release id for an album without a stored MBID."""
+    """Return the MusicBrainz release ID with the best score, for an album without a stored MBID."""
     seen, scored = set(), []
 
     def consider(cands):
@@ -410,7 +406,7 @@ def pick_release(mb, title, artist, track_count, track_titles, rg_id=None):
 
     consider(mb.search_releases(title, artist))
     if max(scored, default=(0, None))[0] < 0.9:
-        # Album title may be the thing that's wrong: look for releases containing its tracks.
+        # The album title can be incorrect. Thus, find the releases that contain its tracks.
         for tt in [t for t in track_titles if t and not GENERIC_TITLE.match(t)][:2]:
             consider(mb.search_releases_by_track(tt, artist))
     best = max(scored, default=(0, None))
@@ -433,7 +429,7 @@ def album_artist_names(album):
 
 
 def find_release(mb, album, tracks):
-    """MusicBrainz release for a Jellyfin album: stored MBID first, then a search. -> (release, confidence)"""
+    """Find the MusicBrainz release for a Jellyfin album: first the stored MBID, then a search. Return (release, confidence)."""
     name, artists = album.get("Name") or "", album_artist_names(album)
     pids = album.get("ProviderIds") or {}
     if pids.get("MusicBrainzAlbum"):
@@ -449,7 +445,7 @@ def find_release(mb, album, tracks):
 
 
 def select_albums(jf, args):
-    """Albums filtered by --library / --album / --limit; also returns the library id."""
+    """Return the albums that agree with --library, --album and --limit. Also return the library ID."""
     lib = jf.music_library_id(args.library) if getattr(args, "library", None) else None
     albums = jf.albums(lib)
     if getattr(args, "album", None):
@@ -472,7 +468,7 @@ def eta_text(started, done, total):
     if done < 5:
         return ""
     left = (time.monotonic() - started) / done * (total - done)
-    return f"  (about {left / 60:.0f} min left)"
+    return f"  (approximately {left / 60:.0f} minutes remain)"
 
 # --------------------------------------------------------------------------- covers
 
@@ -531,8 +527,8 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
     tracks = jf.tracks(album["Id"])
     base = {"album_artist": artist_str, "album": name, "album_id": album["Id"]}
     added = []
-    artist_note = ("Sentence case on an artist name - names like 'Pink Floyd' keep their capitals, "
-                   "check before approving")
+    artist_note = ("Sentence case on an artist name. Names such as 'Pink Floyd' keep their capitals. "
+                   "Examine this change before you approve it.")
 
     def add(**kw):
         row = dict.fromkeys(CSV_COLUMNS, "")
@@ -542,18 +538,18 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
         added.append(row)
 
     def tidy(kind, text):
-        """Apply --straight-quotes and --sentence-case to a value."""
+        """Use --straight-quotes and --sentence-case on a value."""
         text = straighten(text) if args.straight_quotes else (text or "")
         return sentence_case(text, args.keep) if kind in args.sentence_case else text
 
     def case_only(field, current, proposed, **kw):
-        """Row for a capitalization/punctuation fix of Jellyfin's own value (no MusicBrainz data)."""
+        """Add a row that corrects only the capitals or the punctuation of a Jellyfin value (no MusicBrainz data)."""
         sev = classify(current, proposed)
         if sev:
             add(approve="" if field == "album_artist" else "y", field=field, severity=sev,
                 confidence=kw.pop("confidence", "none"), current=current, proposed=proposed,
                 similarity=f"{sim(current, proposed):.2f}",
-                note=artist_note if field == "album_artist" else "Capitalization/punctuation only", **kw)
+                note=artist_note if field == "album_artist" else "Only the capitalization or the punctuation changes", **kw)
 
     def case_only_track(tr, **kw):
         cur = tr.get("Name") or ""
@@ -568,8 +564,8 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
     release, conf = find_release(mb, album, tracks)
     if not release:
         add(field="info", severity="no-match",
-            note="No MusicBrainz match - check the name/artist by hand or tag the files with Picard")
-        # still offer capitalization fixes of what Jellyfin already has
+            note="No MusicBrainz match. Examine the name and the artist manually, or tag the files with Picard.")
+        # also propose capitalization corrections for the values in Jellyfin
         case_only("album_name", name, tidy("album", name))
         case_only("album_artist", artist_str, ARTIST_SEP.join(tidy("artist", a) for a in jf_artists))
         for tr in tracks:
@@ -585,7 +581,7 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
     if sev:
         add(approve=approve, field="album_name", severity=sev, confidence=conf, current=name,
             proposed=proposed, similarity=f"{sim(name, proposed):.2f}",
-            note="Also updates the Album field of every track")
+            note="This also changes the Album field of each track.")
 
     # 3. album artist
     ac = release.get("artist-credit", [])
@@ -598,7 +594,7 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
             cased = "artist" in args.sentence_case
             add(approve="" if cased else approve, field="album_artist", severity=sev, confidence=conf,
                 current=artist_str, proposed=proposed, similarity=f"{sim(artist_str, proposed):.2f}",
-                note=(artist_note + "; " if cased else "") + "Applied to the album and all of its tracks")
+                note=(artist_note + "; " if cased else "") + "This change goes to the album and to all its tracks.")
 
     # 4. cover
     has_cover = bool((album.get("ImageTags") or {}).get("Primary"))
@@ -607,7 +603,7 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
     if not has_cover:
         add(approve=approve if caa else "", field="cover", severity="missing", confidence=conf,
             current="(none)", proposed=caa or "",
-            note="" if caa else "No cover on Cover Art Archive either - put a URL or file path in proposed")
+            note="" if caa else "The Cover Art Archive has no cover. Put a URL or a file path in the proposed column.")
         if caa:
             cover_review.append({"kind": "missing", "album": name, "artist": artist_str, "jf": None,
                                  "mb": thumb, "mb_full": caa, "note": f"confidence: {conf}"})
@@ -617,15 +613,15 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
         if jf_img and ref.ok:
             try:
                 d = bin(dhash(jf_img) ^ dhash(ref.content)).count("1")
-            except Exception as e:  # unreadable image
-                add(field="cover", severity="unreadable", current="(existing cover)", proposed=caa,
-                    confidence=conf, note=f"Could not compare covers: {e}")
+            except Exception as e:  # Pillow cannot read the image
+                add(field="cover", severity="unreadable", current="(current cover)", proposed=caa,
+                    confidence=conf, note=f"Cannot compare the covers: {e}")
             else:
                 if d > args.cover_threshold:
-                    add(field="cover", severity="differs", confidence=conf, current="(existing cover)",
+                    add(field="cover", severity="differs", confidence=conf, current="(current cover)",
                         proposed=caa, similarity=f"{1 - d / 64:.2f}",
-                        note=f"Looks different from MusicBrainz art (distance {d}/64); may be another "
-                             "edition - see the _covers.html page before approving")
+                        note=f"This cover is different from the MusicBrainz cover (distance {d}/64). It can be from a different "
+                             "edition. Examine the _covers.html page before you approve it.")
                     cover_review.append({
                         "kind": "differs", "album": name, "artist": artist_str, "mb": thumb, "mb_full": caa,
                         "jf": f"data:{jf_type or 'image/jpeg'};base64,{base64.b64encode(jf_img).decode()}",
@@ -648,7 +644,7 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
             if best[0] < 0.75:
                 unmatched.append(tr)
                 continue
-            key, note = best[1], "Matched by title (track number missing or different)"
+            key, note = best[1], "Match by title (the track number is different or not there)"
         used.add(key)
         proposed = mb_tracks[key]
         sev = classify(cur, proposed)
@@ -657,7 +653,7 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
         s = sim(cur, proposed)
         ok = s >= 0.5 or GENERIC_TITLE.match(cur) or sev == "missing"
         if not ok:
-            note = (note + "; " if note else "") + "Very different title - check the track order"
+            note = (note + "; " if note else "") + "The title is very different. Examine the track order."
         add(approve=approve if ok else "", field="track_name", severity=sev, confidence=conf,
             disc=key[0] if multi_disc else "", track=key[1], current=cur, proposed=proposed,
             similarity=f"{s:.2f}", item_id=tr["Id"], note=note)
@@ -665,17 +661,17 @@ def audit_album(jf, mb, http, album, args, rows, cover_review):
     mb_count = len(mb_tracks)
     if len(tracks) != mb_count:
         add(field="info", severity="track-count", confidence=conf,
-            note=f"Jellyfin has {len(tracks)} tracks, the MusicBrainz release has {mb_count}")
+            note=f"Jellyfin has {len(tracks)} tracks. The MusicBrainz release has {mb_count} tracks.")
     for tr in unmatched:
         add(field="info", severity="extra-track", confidence=conf, item_id=tr["Id"],
             disc=tr.get("ParentIndexNumber") or "", track=tr.get("IndexNumber") or "",
-            current=tr.get("Name") or "", note="No matching track on the MusicBrainz release")
+            current=tr.get("Name") or "", note="The MusicBrainz release has no track with this title.")
         case_only_track(tr, confidence=conf)
     missing = [mb_tracks[k] for k in mb_tracks if k not in used]
     if missing:
         shown = "; ".join(missing[:8]) + (" ..." if len(missing) > 8 else "")
         add(field="info", severity="missing-tracks", confidence=conf,
-            note=f"{len(missing)} MusicBrainz track(s) not in Jellyfin: {shown}")
+            note=f"MusicBrainz tracks that are not in Jellyfin ({len(missing)}): {shown}")
 
     return "review" if added else "clean"
 
@@ -696,7 +692,7 @@ def write_cover_review(path, items):
                 f'<img src="{esc(i["mb"])}" loading="lazy" alt=""></a></td></tr>')
         body = "".join(cells)
         return (f"<h2>{title} ({len(sel)})</h2><p>{explain}</p><table><tr><th>Album</th>"
-                f"<th>In Jellyfin now</th><th>MusicBrainz suggestion</th></tr>{body}</table>")
+                f"<th>Current cover in Jellyfin</th><th>Cover from MusicBrainz</th></tr>{body}</table>")
 
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Cover review</title><style>
 :root {{ --bg:#fff; --fg:#1d1d1f; --line:#ddd; --muted:#666; color-scheme: light dark; }}
@@ -705,10 +701,10 @@ body {{ background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,sans-seri
 table {{ border-collapse:collapse; }} td,th {{ border-bottom:1px solid var(--line); padding:.6rem 1rem; text-align:left; vertical-align:top; }}
 img {{ width:200px; height:200px; object-fit:contain; }} small,p {{ color:var(--muted); }}
 </style></head><body><h1>Cover review</h1>
-<p>Generated {datetime.now():%Y-%m-%d %H:%M}. To use a MusicBrainz cover, put <b>y</b> in the approve column of that
-album's <b>cover</b> row in the CSV. Rows you leave empty are never changed.</p>
-{table("differs", "Existing covers that look different", "Leave these alone if your current cover is the right one.")}
-{table("missing", "Albums without a cover", "These are pre-approved in the CSV when the album match is confident.")}
+<p>Made on {datetime.now():%Y-%m-%d %H:%M}. To use a MusicBrainz cover, put <b>y</b> in the approve column
+of the <b>cover</b> row of that album in the CSV. Polyhymnia does not change empty rows.</p>
+{table("differs", "Current covers that are different", "If your current cover is correct, do not change the row.")}
+{table("missing", "Albums without a cover", "If the album match is sure, these rows are approved in the CSV.")}
 </body></html>"""
     with open(path, "w", encoding="utf-8") as f:
         f.write(page)
@@ -719,19 +715,19 @@ def cmd_audit(args):
         try:
             import PIL  # noqa: F401
         except ImportError:
-            sys.exit("--compare-covers needs Pillow: pip install pillow")
+            sys.exit("--compare-covers uses Pillow. Install it with: pip install pillow")
     fields = {f.strip().lower() for f in (args.sentence_case or "").split(",") if f.strip()}
     if "all" in fields:
         fields = {"track", "album", "artist"}
     if fields - {"track", "album", "artist"}:
-        sys.exit("--sentence-case takes a comma list of: track, album, artist (or all)")
+        sys.exit("For --sentence-case, use a comma list of: track, album, artist (or all).")
     args.sentence_case = fields
     args.keep = load_keep(args.keep_caps or "keep_caps.txt", explicit=bool(args.keep_caps)) if fields else []
     if fields:
-        print(f"Sentence case for: {', '.join(sorted(fields))}; {len(args.keep)} protected words/phrases",
+        print(f"Sentence case for: {', '.join(sorted(fields))}. Protected words and phrases: {len(args.keep)}.",
               file=sys.stderr)
     if args.contact == "no-contact-given":
-        print("Tip: set MB_CONTACT (an email or URL) - MusicBrainz may throttle anonymous scripts.",
+        print("Set MB_CONTACT to an email address or a URL. MusicBrainz can block requests without a contact.",
               file=sys.stderr)
     jf = make_jf(args)
     mb = MusicBrainz(args.contact, args.cache)
@@ -747,7 +743,7 @@ def cmd_audit(args):
             eta = ""
             if i > 5:
                 left = (time.monotonic() - started) / (i - 1) * (len(albums) - i + 1)
-                eta = f"  (about {left / 60:.0f} min left)"
+                eta = f"  (approximately {left / 60:.0f} minutes remain)"
             print(f"[{i}/{len(albums)}] {album.get('AlbumArtist') or '?'} - {album.get('Name')}{eta}",
                   file=sys.stderr, flush=True)
             try:
@@ -760,7 +756,7 @@ def cmd_audit(args):
                            note=f"{type(e).__name__}: {e}")
                 rows.append(row)
     except KeyboardInterrupt:
-        print("\nInterrupted - writing a partial report.", file=sys.stderr)
+        print("\nStopped. The report contains only the albums examined until now.", file=sys.stderr)
     finally:
         mb.save()
 
@@ -770,18 +766,18 @@ def cmd_audit(args):
         w.writerows(rows)
 
     fixes = [r for r in rows if r["field"] in FIXABLE and r["proposed"]]
-    print(f"\n{sum(stats.values())} albums checked: {stats['clean']} clean, {stats['review']} with "
-          f"differences, {stats['no-match']} not found on MusicBrainz, {stats['error']} errors.")
-    print(f"{len(fixes)} proposed fixes ({sum(r['approve'] == 'y' for r in fixes)} pre-approved) "
-          f"written to {args.output}")
+    print(f"\nAlbums examined: {sum(stats.values())}. Without differences: {stats['clean']}. With differences: "
+          f"{stats['review']}. Not on MusicBrainz: {stats['no-match']}. Errors: {stats['error']}.")
+    print(f"Proposed corrections: {len(fixes)} ({sum(r['approve'] == 'y' for r in fixes)} approved before). "
+          f"Report: {args.output}")
     if cover_review:
         review_path = os.path.splitext(args.output)[0] + "_covers.html"
         write_cover_review(review_path, cover_review)
-        print(f"Side-by-side cover comparison: {review_path}")
-    print(f"Review it, then: jfa apply {args.output}")
+        print(f"Cover comparison page: {review_path}")
+    print(f"Examine the report. Then use: jfa apply {args.output}")
 
 
-# --------------------------------------------------------------------------- writing to Jellyfin
+# --------------------------------------------------------------------------- write to Jellyfin
 
 MAX_UPLOAD = 15 * 1024 * 1024
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
@@ -798,9 +794,9 @@ def _field_value(dto, field):
 
 
 def _same(field, current, exported):
-    """Artist lists count as unchanged when Jellyfin reports the exported names with other spacing, order
-    or capitalization, or leaves some out: it reports artists through their artist pages, and drops names
-    it can't link to one (e.g. after a page was renamed). A name that wasn't in the export is a real edit."""
+    """Compare two artist lists. These differences are not real changes: spaces, order, capitals, and
+    names that Jellyfin does not show. Jellyfin shows artists through their artist pages. It does not show a
+    name without a page, for example after a page got a new name. A name that is not in the export is a real change."""
     if field in ("AlbumArtists", "Artists"):
         return {x.strip().casefold() for x in current or []} <= {x.strip().casefold() for x in exported or []}
     return current == exported
@@ -817,16 +813,18 @@ def shrink_if_huge(data, ctype):
     from PIL import Image
     out = io.BytesIO()
     Image.open(io.BytesIO(data)).convert("RGB").save(out, "JPEG", quality=95)
-    return out.getvalue(), "image/jpeg", f" (re-encoded as JPEG, the {len(data) / 1048576:.0f} MB original is too big to upload)"
+    return out.getvalue(), "image/jpeg", f" (converted to JPEG: the original file has {len(data) / 1048576:.0f} MB, which is too large for an upload)"
 
 
 def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stored_artists=False):
-    """Show, and with --commit apply, metadata changes and cover uploads. Backs everything up first.
+    """Show the changes to data and covers. With --commit, make a backup first and then write the changes.
 
-    changes:  item_id -> any of {"Name", "Album", "AlbumArtists", "Artists"}
-    expected: item_id -> {field: value Jellyfin must still have}; a field that no longer matches is skipped
+    changes:  item_id -> one or more of {"Name", "Album", "AlbumArtists", "Artists"}
+    expected: item_id -> {field: the value that Jellyfin must have}. If the value is different, the field
+              does not change, and a NOT CHANGED line shows the reason.
     covers:   album_id -> {"src": URL or file, "label": str, optional "expect_tag", optional "backup_file"}
-    follow:   like expected, but for values that only follow another edit: dropped quietly if they differ
+    follow:   the same as expected, for values that only follow a different change. If the value is
+              different, the field does not change, and no line shows this.
     """
     expected, covers, follow = expected or {}, covers or {}, follow or {}
     planned, skipped = [], 0
@@ -834,21 +832,21 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
         try:
             dto = jf.item(item_id)
         except RuntimeError as e:
-            print(f"SKIP item {item_id}: not found in Jellyfin ({e})")
+            print(f"NOT CHANGED: item {item_id}. Jellyfin cannot find it ({e}).")
             skipped += 1
             continue
         label = f"{dto.get('Type', 'Item')} {dto.get('Name')!r}"
         ch = dict(ch)
         for field, want in expected.get(item_id, {}).items():
             if field in ch and not _same(field, _field_value(dto, field), want):
-                print(f"SKIP {label}: {field} is {_field_value(dto, field)!r} in Jellyfin but was {want!r} "
-                      "in the export, so it was changed since - leaving it alone")
+                print(f"NOT CHANGED: {label}. In Jellyfin, {field} is {_field_value(dto, field)!r}. The export has "
+                      f"{want!r}. Somebody changed this value after the export.")
                 ch.pop(field)
                 skipped += 1
         for field, want in follow.get(item_id, {}).items():
             if field in ch and not _same(field, _field_value(dto, field), want):
                 ch.pop(field)
-        def now(f):   # check-names compares track artists with the stored list, which includes hidden names
+        def now(f):   # check-names compares track artists with the stored list. This list also has the names that Jellyfin does not show.
             if stored_artists and f == "Artists" and dto.get("Type") == "Audio" and "Artists" in dto:
                 return list(dto.get("Artists") or [])
             return _field_value(dto, f)
@@ -863,30 +861,30 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
             try:
                 tag = (jf.item(aid).get("ImageTags") or {}).get("Primary")
             except RuntimeError:
-                print(f"SKIP cover for {spec.get('label', aid)}: album not found in Jellyfin")
+                print(f"NOT CHANGED: cover for {spec.get('label', aid)}. Jellyfin cannot find the album.")
                 continue
             if tag != spec["expect_tag"]:
-                print(f"SKIP cover for {spec.get('label', aid)}: the cover was changed in Jellyfin after "
-                      "covers-fetch, leaving it alone")
+                print(f"NOT CHANGED: cover for {spec.get('label', aid)}. Somebody changed the cover in Jellyfin "
+                      "after covers-fetch.")
                 skipped += 1
                 continue
         planned_covers.append((aid, spec))
         print(f"Cover for {spec.get('label', aid)} <- {spec['src']}")
 
     if not planned and not planned_covers:
-        print("Nothing to change." + (f" ({skipped} change(s) skipped, see above)" if skipped else ""))
+        print("There is nothing to change." + (f" Changes not done: {skipped} (see the NOT CHANGED lines)." if skipped else ""))
         return
-    print(f"\n{len(planned)} item(s) and {len(planned_covers)} cover(s) to update"
-          + (f", {skipped} change(s) skipped." if skipped else "."))
+    print(f"\nItems to change: {len(planned)}. Covers to change: {len(planned_covers)}."
+          + (f" Changes not done: {skipped}." if skipped else ""))
     if not args.commit:
-        print("Dry run only - nothing was changed. Re-run with --commit to apply.")
+        print("This was a dry run. Polyhymnia did not change data. To write the changes, do the command again with --commit.")
         return
 
     backup_path = args.backup or f"backup-{datetime.now():%Y%m%d-%H%M%S}.json"
     backup = {"created": datetime.now().isoformat(), "server": jf.url,
               "items": [dto for dto, _ in planned], "images": []}
     for aid, spec in planned_covers:
-        if "backup_file" in spec:   # covers-fetch already saved the current cover at full quality
+        if "backup_file" in spec:   # covers-fetch saved the current cover at full quality before
             f = spec["backup_file"]
             backup["images"].append({"id": aid, "had_image": bool(f), "file": os.path.abspath(f) if f else None,
                                      "content_type": EXT_TYPE.get(os.path.splitext(f or "")[1].lower(), "image/jpeg")})
@@ -895,7 +893,7 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
             backup["images"].append({"id": aid, "had_image": data is not None, "content_type": ctype,
                                      "data": base64.b64encode(data).decode() if data else None})
     save_json(backup_path, backup)
-    print(f"Backup of the original values written to {backup_path}")
+    print(f"Polyhymnia wrote a backup of the initial values to {backup_path}")
 
     ok = failed = 0
     for dto, ch in planned:
@@ -912,8 +910,8 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
             new["ArtistItems"] = _name_pairs(ch["Artists"], dto.get("ArtistItems"))
             new["Artists"] = list(ch["Artists"])
         elif dto.get("Artists") and dto.get("Type") == "Audio":
-            # ArtistItems can leave out names Jellyfin can't link to an artist page; the plain
-            # Artists list is what is stored, so write that back to avoid dropping anyone
+            # ArtistItems does not contain names without an artist page. The Artists list contains
+            # all stored names. Thus, write the Artists list, so that no name is lost.
             new["ArtistItems"] = _name_pairs(list(dto["Artists"]), dto.get("ArtistItems"))
         if getattr(args, "lock_item", False):
             new["LockData"] = True
@@ -922,7 +920,7 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
             ok += 1
         except Exception as e:
             failed += 1
-            print(f"FAILED {dto.get('Name')!r}: {e}")
+            print(f"ERROR: {dto.get('Name')!r}: {e}")
 
     http = requests.Session()
     http.headers["User-Agent"] = f"polyhymnia/{VERSION} ( {args.contact} )"
@@ -936,8 +934,8 @@ def run_changes(jf, changes, args, expected=None, covers=None, follow=None, stor
                 print(f"Cover for {spec.get('label', aid)}{note}")
         except Exception as e:
             failed += 1
-            print(f"FAILED cover for {spec.get('label', aid)}: {e}")
-    print(f"Done: {ok} updated, {failed} failed. Undo with: "
+            print(f"ERROR: cover for {spec.get('label', aid)}: {e}")
+    print(f"Result: {ok} changed, {failed} errors. To restore the initial values, use: "
           f"jfa restore {backup_path} --commit")
 
 
@@ -947,7 +945,7 @@ def cmd_apply(args):
         rows = [r for r in csv.DictReader(f)
                 if (r.get("approve") or "").strip().lower() in APPROVE_YES and r.get("field") in FIXABLE]
     if not rows:
-        print("No approved rows in the report (put y in the approve column).")
+        print("The report has no approved rows. Put y in the approve column.")
         return
     changes, covers, track_ids = defaultdict(dict), {}, {}
 
@@ -959,7 +957,7 @@ def cmd_apply(args):
     for r in rows:
         field, aid, prop = r["field"], r["album_id"], r["proposed"].strip()
         if not prop:
-            print(f"Skipping {field} for {r['album']!r}: proposed value is empty")
+            print(f"NOT CHANGED: {field} for {r['album']!r}. The proposed value is empty.")
         elif field == "track_name":
             changes[r["item_id"]]["Name"] = prop
         elif field == "album_name":
@@ -981,10 +979,10 @@ def cmd_restore(args):
         backup = json.load(f)
     print(f"Backup from {backup['created']}: {len(backup['items'])} item(s), {len(backup['images'])} cover(s).")
     if not args.commit:
-        print("Dry run only - re-run with --commit to restore.")
+        print("This was a dry run. To restore the values, do the command again with --commit.")
         return
     for dto in backup["items"]:
-        if dto.get("Type") == "Audio" and dto.get("Artists"):   # stored list, see run_changes
+        if dto.get("Type") == "Audio" and dto.get("Artists"):   # the stored list (see run_changes)
             dto = dict(dto, ArtistItems=_name_pairs(list(dto["Artists"]), dto.get("ArtistItems")))
         jf.update_item(dto)
     for img in backup["images"]:
@@ -995,7 +993,7 @@ def cmd_restore(args):
         else:
             with open(img["file"], "rb") as f:
                 jf.set_image(img["id"], f.read(), img["content_type"])
-    print("Restored.")
+    print("Polyhymnia restored the initial values.")
 
 # --------------------------------------------------------------------------- names export / import
 
@@ -1005,7 +1003,7 @@ NAMES_NOTE = ("Edit album, album_artist, title or artists. Do not change any id.
 
 
 def _write_names(path, header, albums):
-    """One track per line, so the file stays readable and diff-friendly."""
+    """Write one track on each line. This makes the file easy to read and to compare."""
     lines = ["{"] + [f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}," for k, v in header.items()]
     lines.append('  "albums": [')
     for i, a in enumerate(albums):
@@ -1015,7 +1013,7 @@ def _write_names(path, header, albums):
         lines.append("    ]}" + ("," if i < len(albums) - 1 else ""))
     lines += ["  ]", "}"]
     text = "\n".join(lines) + "\n"
-    json.loads(text)  # sanity check
+    json.loads(text)  # make sure that the text is valid JSON
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -1028,7 +1026,7 @@ def cmd_export_names(args):
     params = dict(IncludeItemTypes="Audio", Recursive="true", Fields="ParentId", SortBy="SortName")
     if lib:
         params["ParentId"] = lib
-    print("Reading tracks from Jellyfin...", file=sys.stderr)
+    print("Polyhymnia reads the tracks from Jellyfin.", file=sys.stderr)
     for t in jf._items(**params):
         aid = t.get("AlbumId") or t.get("ParentId")
         if aid in wanted:
@@ -1064,15 +1062,15 @@ def cmd_export_names(args):
                   "part": f"{n} of {len(parts)}", "note": NAMES_NOTE}
         _write_names(path, header, part)
         files.append(path)
-    print(f"Exported {len(out)} albums and {n_tracks} tracks to {len(files)} file(s): {', '.join(files)}")
-    print("Keep these originals. Edit a copy, then run: import-names <original> <edited>")
+    print(f"Polyhymnia wrote {len(out)} albums and {n_tracks} tracks to {len(files)} file(s): {', '.join(files)}")
+    print("Keep these original files. Edit a copy of each file. Then use: import-names <original> <edited>")
 
 
 def _load_names(path):
     with open(path, encoding="utf-8-sig") as f:
         doc = json.load(f)
     if doc.get("format") != NAMES_FORMAT:
-        sys.exit(f"{path} is not a file made by export-names.")
+        sys.exit(f"The file {path} is not from export-names.")
     albums, tracks = {}, {}
     for a in doc.get("albums", []):
         albums[a["id"]] = a
@@ -1088,8 +1086,9 @@ def _as_list(v):
 
 
 def _page_renames(pages, wanted):
-    """(page id, current name, wanted name) for pages that differ from a wanted name only in
-    capitalization or surrounding spaces, when no page has the exact wanted name yet."""
+    """Find the artist pages to rename. A page goes in the list if two conditions are true.
+    First, its name is different from the new name only in capitals or spaces.
+    Second, no page has the exact new name. Return (page ID, current name, new name)."""
     by_fold = defaultdict(list)
     for pid, pname in pages.items():
         by_fold[pname.strip().casefold()].append((pid, pname))
@@ -1102,15 +1101,15 @@ def _page_renames(pages, wanted):
 
 
 def cmd_check_names(args):
-    """Compare what Jellyfin has now with the edited files and report in plain words.
-    With --fix, also plan the writes that make Jellyfin match (dry run unless --commit)."""
+    """Compare Jellyfin with the edited files. Write a report in plain words.
+    With --fix, also make a plan to correct the differences (a dry run without --commit)."""
     files = args.edited
     want_albums, want_tracks = {}, {}
     for f in files:
         a, t = _load_names(f)
         want_albums.update(a)
         want_tracks.update(t)
-    # the original exports (X.json next to X_edited.json) tell which artists were meant to be replaced
+    # The original exports (X.json next to X_edited.json) show which artists the edit replaced.
     orig_artists = {}
     for f in files:
         o = re.sub(r"_edited(\.json)$", r"\1", f)
@@ -1119,17 +1118,17 @@ def cmd_check_names(args):
             for tid, (aid, t) in ot.items():
                 orig_artists[tid] = _as_list(t.get("artists")) or _as_list(oa[aid].get("album_artist"))
     if not orig_artists:
-        print("Note: original exports not found next to the edited files; extra track artists are always kept.",
+        print("Polyhymnia cannot find the original exports next to the edited files. It keeps all extra track artists.",
               file=sys.stderr)
     jf = make_jf(args)
-    print("Reading albums, tracks and artist pages from Jellyfin...", file=sys.stderr)
+    print("Polyhymnia reads the albums, tracks and artist pages from Jellyfin.", file=sys.stderr)
     albums = {a["Id"]: a for a in jf.albums()}
     tracks = {t["Id"]: t for t in jf._items(IncludeItemTypes="Audio", Recursive="true",
                                             Fields="ParentId", SortBy="SortName")}
     pages = dict(jf.artist_pages())
 
     def pages_for(name):
-        """Pages matching a name ignoring case/spaces; searches Jellyfin directly if the list missed it."""
+        """Find the pages for a name. Ignore capitals and spaces. If the list does not have the page, search Jellyfin."""
         fold = name.strip().casefold()
         hits = [(pid, pn) for pid, pn in pages.items() if pn.strip().casefold() == fold]
         if not hits:
@@ -1161,13 +1160,13 @@ def cmd_check_names(args):
         cur = albums.get(aid)
         if not cur:
             stats["albums"]["not found"] += 1
-            problems[label].append("album not found in Jellyfin (removed or re-created?) - nothing to fix here")
+            problems[label].append("Jellyfin cannot find the album. Somebody removed it or made it again.")
             continue
         if (cur.get("Name") or "") == wa.get("album", ""):
             stats["album names"]["correct"] += 1
         else:
             stats["album names"]["different"] += 1
-            problems[label].append(f"album name is {cur.get('Name')!r}, should be {wa.get('album')!r}")
+            problems[label].append(f"The album name is {cur.get('Name')!r}. The file has {wa.get('album')!r}.")
             changes[aid]["Name"], expected[aid]["Name"] = wa.get("album", ""), cur.get("Name") or ""
         want_aa = _as_list(wa.get("album_artist"))
         shown = [x.get("Name") for x in cur.get("AlbumArtists") or [] if x.get("Name")]
@@ -1175,9 +1174,9 @@ def cmd_check_names(args):
             stats["album artists"]["correct"] += 1
         else:
             stats["album artists"]["different"] += 1
-            why = [f"no artist page for {n!r} yet" if page_of(n)[0] == "missing" else
-                   f"the artist page for {n!r} is spelled {page_of(n)[1][0][1]!r}" for n in want_aa if page_of(n)[0] != "ok"]
-            problems[label].append(f"album artists show as {shown}, should be {want_aa}"
+            why = [f"{n!r} has no artist page" if page_of(n)[0] == "missing" else
+                   f"the artist page for {n!r} has the name {page_of(n)[1][0][1]!r}" for n in want_aa if page_of(n)[0] != "ok"]
+            problems[label].append(f"Jellyfin shows the album artists {shown}. The file has {want_aa}."
                                    + (f" ({'; '.join(why)})" if why else ""))
             changes[aid]["AlbumArtists"] = want_aa
             for t in wa.get("tracks", []):
@@ -1188,19 +1187,19 @@ def cmd_check_names(args):
         cur = tracks.get(tid)
         if not cur:
             stats["track titles"]["not found"] += 1
-            problems[label].append(f"track {wt.get('title')!r} not found in Jellyfin")
+            problems[label].append(f"Jellyfin cannot find the track {wt.get('title')!r}.")
             continue
         if (cur.get("Name") or "") == wt.get("title", ""):
             stats["track titles"]["correct"] += 1
         else:
             stats["track titles"]["different"] += 1
-            problems[label].append(f"track title is {cur.get('Name')!r}, should be {wt.get('title')!r}")
+            problems[label].append(f"The track title is {cur.get('Name')!r}. The file has {wt.get('title')!r}.")
             changes[tid]["Name"], expected[tid]["Name"] = wt.get("title", ""), cur.get("Name") or ""
         if "artists" in wt:
             want_ta, stored = _as_list(wt.get("artists")), list(cur.get("Artists") or [])
             fold = lambda xs: {x.strip().casefold() for x in xs}
-            # extras: names Jellyfin has that the file doesn't. Keep those the export never saw (hidden names
-            # from your music files); drop those that were in the export, because the edit replaced them.
+            # Extra names are in Jellyfin, but not in the file. Keep the extra names that were not in the export
+            # (Jellyfin did not show them). Remove the extra names that were in the export: the edit replaced them.
             extras = [x for x in stored if x.strip().casefold() not in fold(want_ta)]
             replaced = [x for x in extras if x.strip().casefold() in fold(orig_artists.get(tid, []))]
             keep = [x for x in extras if x not in replaced]
@@ -1208,11 +1207,11 @@ def cmd_check_names(args):
             if not missing and not replaced and stored == want_ta:
                 stats["track artists"]["correct"] += 1
             elif not missing and not replaced:
-                stats["track artists"]["correct, with extras"] += 1
-                notes[label].append(f"{wt.get('title')!r} also lists {keep} (from your music files - fine to keep)")
+                stats["track artists"]["correct, with extra artists"] += 1
+                notes[label].append(f"{wt.get('title')!r} also has the artists {keep}. They come from your music files. Keep them.")
             else:
                 stats["track artists"]["different"] += 1
-                problems[label].append(f"track {wt.get('title')!r}: artists are {stored}, should be {want_ta + keep}")
+                problems[label].append(f"The track {wt.get('title')!r} has the artists {stored}. The file has {want_ta + keep}.")
                 changes[tid]["Artists"] = want_ta + keep
 
     wanted_names = {n for a in want_albums.values() for n in _as_list(a.get("album_artist"))}
@@ -1223,27 +1222,27 @@ def cmd_check_names(args):
         if state == "ok":
             stats["artist pages"]["correct"] += 1
         elif state == "spelled":
-            stats["artist pages"]["spelled differently"] += 1
-            spelled.append(f"{hits[0][1]!r} should be {n!r}")
+            stats["artist pages"]["different name"] += 1
+            spelled.append(f"The page {hits[0][1]!r} must have the name {n!r}.")
             if len(hits) == 1:
                 changes[hits[0][0]]["Name"], expected[hits[0][0]]["Name"] = n, hits[0][1]
         else:
-            # Jellyfin may have renamed the page itself (its online artist lookup can pick another artist's
-            # name). Asking for the page by name finds it; rename it back unless it is that other artist's own page.
+            # Jellyfin can change the name of a page: its online search can use the name of a different artist.
+            # A request for the page by name finds it. Restore the name if it is not the page of the other artist.
             page = jf.artist(n)
             if page and page.get("Id") and page.get("Name") and page["Name"] != n:
                 own = jf.artist(page["Name"])
                 if own and own.get("Id") != page["Id"]:
                     stats["artist pages"]["renamed by Jellyfin"] += 1
-                    spelled.append(f"{page['Name']!r} should be {n!r} (Jellyfin renamed this page; "
-                                   f"it is not the real {page['Name']!r} page)")
+                    spelled.append(f"The page {page['Name']!r} must have the name {n!r}. Jellyfin changed the name of this "
+                                   f"page. It is not the correct page of {page['Name']!r}.")
                     changes[page["Id"]]["Name"], expected[page["Id"]]["Name"] = n, page["Name"]
                     continue
-            stats["artist pages"]["missing"] += 1
+            stats["artist pages"]["not there"] += 1
             missing_pages.append(n)
 
-    lines = [f"Checked {len(want_albums)} albums and {len(want_tracks)} tracks from {len(files)} file(s) "
-             f"against Jellyfin.", ""]
+    lines = [f"Polyhymnia compared {len(want_albums)} albums and {len(want_tracks)} tracks from {len(files)} file(s) "
+             f"with Jellyfin.", ""]
     for key in ("album names", "album artists", "track titles", "track artists", "artist pages", "albums"):
         if stats[key]:
             lines.append(f"  {key:15} " + ", ".join(f"{v} {k}" for k, v in stats[key].items()))
@@ -1253,41 +1252,41 @@ def cmd_check_names(args):
             lines.append(f"  {label}")
             lines += [f"    - {x}" for x in items]
     if spelled:
-        lines += ["", "Artist pages spelled differently (--fix renames them):"] + [f"  - {x}" for x in spelled]
+        lines += ["", "Artist pages with a different name (--fix changes the names):"] + [f"  - {x}" for x in spelled]
     if missing_pages:
-        lines += ["", "Names without an artist page (Jellyfin creates pages during a library scan; "
-                      "until then it hides these names):"] + [f"  - {x!r}" for x in missing_pages]
+        lines += ["", "Names without an artist page. A library scan makes the artist pages. "
+                      "Before the scan, Jellyfin does not show these names:"] + [f"  - {x!r}" for x in missing_pages]
     if notes:
-        lines += ["", "Notes (no action needed):"]
+        lines += ["", "Notes (no action is necessary):"]
         for label, items in notes.items():
             lines += [f"  {label}: {x}" for x in items]
     if not problems and not spelled and not missing_pages:
-        lines += ["", "Everything matches the edited files."]
+        lines += ["", "All values are the same as in the edited files."]
     elif not args.fix and (problems or spelled):
-        lines += ["", "To make Jellyfin match the files: run this again with --fix (dry run), then --fix --commit."]
+        lines += ["", "To correct the differences, do this command again with --fix (dry run). Then use --fix --commit."]
     elif not problems and not spelled:
-        lines += ["", "Names, titles and artists all match. Only artist pages are missing: run a library scan "
-                      "(Dashboard > Scheduled Tasks > Scan Media Library), then check again."]
+        lines += ["", "All names, titles and artists are correct. Only artist pages are not there. Start a library "
+                      "scan (Dashboard > Scheduled Tasks > Scan Media Library). Then do this command again."]
     report = "\n".join(lines) + "\n"
     print(report)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(report)
-    print(f"(Also saved to {args.output})")
+    print(f"(Polyhymnia also wrote this report to {args.output}.)")
 
     if args.fix:
-        print("\n--- Fix plan ---")
+        print("\n--- Plan for --fix ---")
         if not changes:
-            print("Nothing to write." + (" Run a library scan for the names without an artist page." if missing_pages else ""))
+            print("There is nothing to write." + (" Start a library scan for the names without an artist page." if missing_pages else ""))
             return
         run_changes(jf, changes, args, expected=expected, stored_artists=True)
         if args.commit and missing_pages:
-            for n in missing_pages:        # asking Jellyfin for the page lets it create one where it can
+            for n in missing_pages:        # a request for the page tells Jellyfin to make the page, if possible
                 jf.artist(n)
-            print("Asked Jellyfin to create the missing artist pages; a library scan completes this.")
+            print("Polyhymnia asked Jellyfin to make the artist pages. A library scan completes this procedure.")
 
 
 def cmd_lock_names(args):
-    """Lock the Name field of every album and track in the edited files, so scans can't change them."""
+    """Lock the Name field of all albums and tracks in the edited files, so that scans cannot change them."""
     want_albums, want_tracks = {}, {}
     for f in args.edited:
         a, t = _load_names(f)
@@ -1298,7 +1297,7 @@ def cmd_lock_names(args):
     todo += [(tid, _as_list(want_albums[aid].get("album_artist"))) for tid, (aid, _) in want_tracks.items()]
     planned, already, missing = [], 0, 0
     started = time.monotonic()
-    print(f"Looking at {len(todo)} albums and tracks...", file=sys.stderr)
+    print(f"Polyhymnia examines the albums and tracks. Number: {len(todo)}.", file=sys.stderr)
     for i, (iid, album_artists) in enumerate(todo, 1):
         if i % 500 == 0:
             print(f"  [{i}/{len(todo)}]{eta_text(started, i, len(todo))}", file=sys.stderr, flush=True)
@@ -1312,23 +1311,23 @@ def cmd_lock_names(args):
             continue
         planned.append((dto, album_artists))
     albums_n = sum(1 for d, _ in planned if d.get("Type") == "MusicAlbum")
-    print(f"\n{len(planned)} name(s) to lock ({albums_n} albums, {len(planned) - albums_n} tracks), "
-          f"{already} already locked, {missing} not found in Jellyfin.")
+    print(f"\nNames to lock: {len(planned)} (albums: {albums_n}, tracks: {len(planned) - albums_n}). "
+          f"Names locked before: {already}. Names that Jellyfin cannot find: {missing}.")
     if not planned:
         return
     if not args.commit:
-        print("Dry run only - nothing was changed. Re-run with --commit to lock them.")
+        print("This was a dry run. Polyhymnia did not change data. To lock the names, do the command again with --commit.")
         return
     backup_path = args.backup or f"backup-locks-{datetime.now():%Y%m%d-%H%M%S}.json"
     save_json(backup_path, {"created": datetime.now().isoformat(), "server": jf.url,
                             "items": [d for d, _ in planned], "images": []})
-    print(f"Backup of the original values written to {backup_path}")
+    print(f"Polyhymnia wrote a backup of the initial values to {backup_path}")
     ok = failed = 0
     started = time.monotonic()
     for i, (dto, album_artists) in enumerate(planned, 1):
         new = json.loads(json.dumps(dto))
         new["LockedFields"] = sorted(set(new.get("LockedFields") or []) | {"Name"})
-        # write artist lists from the files / the stored list, never from Jellyfin's view (which hides names)
+        # write the artist lists from the files or the stored list. Do not use the Jellyfin view: it does not show all names.
         if album_artists:
             new["AlbumArtists"] = _name_pairs(album_artists, dto.get("AlbumArtists"))
         if dto.get("Type") == "Audio" and dto.get("Artists"):
@@ -1338,10 +1337,10 @@ def cmd_lock_names(args):
             ok += 1
         except Exception as e:
             failed += 1
-            print(f"FAILED {dto.get('Name')!r}: {e}")
+            print(f"ERROR: {dto.get('Name')!r}: {e}")
         if i % 500 == 0:
-            print(f"  locked {i}/{len(planned)}{eta_text(started, i, len(planned))}", file=sys.stderr, flush=True)
-    print(f"Done: {ok} locked, {failed} failed. Undo with: jfa restore {backup_path} --commit")
+            print(f"  locked: {i}/{len(planned)}{eta_text(started, i, len(planned))}", file=sys.stderr, flush=True)
+    print(f"Result: {ok} locked, {failed} errors. To restore the initial values, use: jfa restore {backup_path} --commit")
 
 
 def cmd_import_names(args):
@@ -1368,7 +1367,7 @@ def cmd_import_names(args):
             changes[aid]["AlbumArtists"], expected[aid]["AlbumArtists"] = new_art, old_art
             for t in oa.get("tracks", []):
                 changes[t["id"]]["AlbumArtists"] = new_art
-                if "artists" not in t:   # track artists matched the album artists: keep them matching
+                if "artists" not in t:   # the track artists were the same as the album artists: keep them the same
                     changes[t["id"]]["Artists"], follow[t["id"]]["Artists"] = new_art, old_art
             counts["album artists"] += 1
 
@@ -1389,12 +1388,12 @@ def cmd_import_names(args):
             counts["track artists"] += 1
 
     if unknown:
-        print(f"Warning: {unknown} album/track id(s) in {args.edited} are not in {args.original}; ignored.")
+        print(f"{unknown} album or track IDs in {args.edited} are not in {args.original}. Polyhymnia ignores them.")
     if not changes:
-        print("The edited file has no differences from the original - nothing to do.")
+        print("The edited file is the same as the original file. There is nothing to change.")
         return
-    # Items that get written back are written in full; make sure their artist lists come from the files
-    # (complete) and not from Jellyfin's view of them (which can leave names out)
+    # Polyhymnia writes each item in full. Make sure that the artist lists come from the files (complete),
+    # and not from the Jellyfin view (it does not show all names).
     for aid, na in new_albums.items():
         oa = orig_albums.get(aid)
         if not oa:
@@ -1409,27 +1408,27 @@ def cmd_import_names(args):
                 continue
             if "AlbumArtists" not in changes[tid] and alist:
                 changes[tid]["AlbumArtists"], follow[tid]["AlbumArtists"] = alist, old_alist
-            # track artists need nothing here: run_changes writes back the stored list unchanged
+            # track artists: run_changes writes the stored list again, without changes
 
-    # Artist pages: Jellyfin may match artist names regardless of case, so its artist entry can
-    # keep the old spelling ("Daft Punk") after the tracks say "Daft punk". Rename those entries too.
+    # Artist pages: Jellyfin can ignore capitals when it finds an artist page. Thus, a page can keep the
+    # old name ("Daft Punk") when the tracks have "Daft punk". Change the name of these pages too.
     wanted = {n for ch in changes.values() for key in ("AlbumArtists", "Artists") for n in ch.get(key, [])}
     renamed = 0
     if wanted:
-        print(f"Checking {len(wanted)} artist name(s) against Jellyfin's artist pages...", file=sys.stderr)
+        print(f"Polyhymnia compares the artist names with the artist pages in Jellyfin. Names: {len(wanted)}.", file=sys.stderr)
         for pid, old, new in _page_renames(jf.artist_pages(), wanted):
             changes[pid]["Name"], expected[pid]["Name"] = new, old
             renamed += 1
     if renamed:
         counts["artist pages"] = renamed
-    print("Edited: " + ", ".join(f"{v} {k}" for k, v in counts.items()) + "\n")
+    print("Changes in the edited file: " + ", ".join(f"{v} {k}" for k, v in counts.items()) + "\n")
     run_changes(jf, changes, args, expected=expected, follow=follow)
 
 # --------------------------------------------------------------------------- cover picker
 
 
 def caa_front(http, kind, mbid):
-    """Full-resolution URL of the front cover of a release or release group, or None."""
+    """Return the URL of the full-size front cover of a release or a release group, or None."""
     try:
         r = http.get(f"https://coverartarchive.org/{kind}/{mbid}", timeout=60,
                      headers={"Accept": "application/json"})
@@ -1460,7 +1459,7 @@ def save_cover(folder, stem, data, ctype):
         im.save(os.path.join(folder, stem + "_thumb.jpg"), "JPEG", quality=85)
         info["thumb"] = stem + "_thumb.jpg"
     except Exception:
-        pass  # unusual format: the page shows the full image instead
+        pass  # unusual format: the page shows the full image
     return info
 
 
@@ -1502,7 +1501,7 @@ def cmd_covers_fetch(args):
     try:
         import PIL  # noqa: F401
     except ImportError:
-        sys.exit("covers-fetch needs Pillow: pip install pillow")
+        sys.exit("covers-fetch uses Pillow. Install it with: pip install pillow")
     jf = make_jf(args)
     mb = MusicBrainz(args.contact, args.cache)
     http = requests.Session()
@@ -1515,7 +1514,7 @@ def cmd_covers_fetch(args):
         with open(index_path, encoding="utf-8") as f:
             index = json.load(f)
     todo = [a for a in albums if args.refetch or a["Id"] not in index]
-    print(f"{len(albums)} albums: {len(albums) - len(todo)} already fetched, {len(todo)} to do.", file=sys.stderr)
+    print(f"Albums: {len(albums)}. Downloaded before: {len(albums) - len(todo)}. To download now: {len(todo)}.", file=sys.stderr)
     started, errors = time.monotonic(), 0
     try:
         for i, album in enumerate(todo, 1):
@@ -1523,24 +1522,24 @@ def cmd_covers_fetch(args):
                   f"{eta_text(started, i - 1, len(todo))}", file=sys.stderr, flush=True)
             try:
                 index[album["Id"]] = fetch_album_covers(jf, mb, http, album, args.dir)
-            except Exception as e:   # not stored, so the next run retries it
+            except Exception as e:   # not stored: the next run tries this album again
                 errors += 1
-                print(f"   error: {type(e).__name__}: {e}", file=sys.stderr)
+                print(f"   ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             if i % 10 == 0:
                 save_json(index_path, index)
     except KeyboardInterrupt:
-        print("\nInterrupted - progress is saved, run covers-fetch again to continue.", file=sys.stderr)
+        print("\nStopped. Polyhymnia saved the progress. To continue, start covers-fetch again.", file=sys.stderr)
     finally:
         save_json(index_path, index)
         mb.save()
     entries = list(index.values())
-    print(f"\n{len(entries)} albums in {args.dir}/: {sum(1 for e in entries if e['new'])} with a cover found online, "
-          f"{sum(1 for e in entries if not e['current'])} without a current cover, {errors} errors this run.")
-    print(f"Next: jfa covers-review   (then open the page in your browser)")
+    print(f"\nAlbums in {args.dir}/: {len(entries)}. New cover found: {sum(1 for e in entries if e['new'])}. "
+          f"No current cover: {sum(1 for e in entries if not e['current'])}. Errors in this run: {errors}.")
+    print("Next step: jfa covers-review. Then open the page in your browser.")
 
 
 PICKER_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Pick album covers</title><style>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Select album covers</title><style>
 :root{--bg:#f5f5f3;--card:#fff;--fg:#1c1c1e;--muted:#6b6b70;--line:#e0e0dd;--accent:#2f6fde;--warn:#a35f00;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--bg:#141416;--card:#1f1f22;--fg:#ececef;--muted:#9c9ca3;--line:#34343a;--accent:#6e9dff;--warn:#e3a54a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -1560,15 +1559,15 @@ main{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:
 .empty{display:grid;place-items:center;color:var(--muted);font-size:13px}
 .lbl{font-size:12px;color:var(--muted);margin-top:5px}.lbl b{color:var(--fg)}a{color:var(--accent)}
 </style></head><body>
-<header><h1>Pick album covers</h1>
-<p class="help">Click the cover you want for each album. Every album keeps its current cover unless you choose the new one. Choices are saved as you click.</p>
+<header><h1>Select album covers</h1>
+<p class="help">For each album, click the cover to use. If you do not click the new cover, the album keeps its current cover. Polyhymnia saves each selection immediately.</p>
 <div class="bar" id="filters"></div>
-<div class="bar"><input type="search" id="q" placeholder="Search album or artist">
-<button id="allNew">Use new for all shown</button><button id="allCur">Keep current for all shown</button>
+<div class="bar"><input type="search" id="q" placeholder="Find an album or an artist">
+<button id="allNew">New cover for all albums shown</button><button id="allCur">Current cover for all albums shown</button>
 <span class="sep"></span><span id="status"></span></div></header>
 <main id="grid"></main>
 <script>
-const CATS=[["different","Different art"],["missing","No cover yet"],["better","Same art, higher resolution"],["same","Same art"],["none","Nothing found online"],["chosen","Chosen: new"],["all","All"]];
+const CATS=[["different","Different cover"],["missing","No current cover"],["better","Same cover, better quality"],["same","Same cover"],["none","No new cover"],["chosen","New cover selected"],["all","All"]];
 let data={albums:[]},choices={},filter="different",q="";
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1576,13 +1575,13 @@ function cat(a){if(!a.new)return"none";if(!a.current)return"missing";
  if(a.distance!=null&&a.distance>data.threshold)return"different";
  const pc=(a.current.width||0)*(a.current.height||0),pn=(a.new.width||0)*(a.new.height||0);return pn>1.5*pc?"better":"same"}
 function size(i){const b=i.bytes,s=b>=1048576?(b/1048576).toFixed(1)+" MB":Math.max(1,Math.round(b/1024))+" KB";return i.width?`${i.width}×${i.height} · ${s}`:s}
-function opt(a,which){const i=a[which],sel=(choices[a.id]||"current")===which,label=which==="new"?"Use new":"Keep current";
+function opt(a,which){const i=a[which],sel=(choices[a.id]||"current")===which,label=which==="new"?"Use the new cover":"Keep the current cover";
  const click=(which==="current"||i)?` data-id="${a.id}" data-c="${which}"`:"";
- const pic=i?`<img loading="lazy" src="/img/${a.id}/${i.thumb||i.file}" alt="">`:`<div class="empty">${which==="new"?"Nothing found online":"No cover"}</div>`;
- const info=i?`<br>${size(i)} · <a href="/img/${a.id}/${i.file}" target="_blank">full size</a>`:"";
+ const pic=i?`<img loading="lazy" src="/img/${a.id}/${i.thumb||i.file}" alt="">`:`<div class="empty">${which==="new"?"No new cover":"No cover"}</div>`;
+ const info=i?`<br>${size(i)} · <a href="/img/${a.id}/${i.file}" target="_blank">Full size</a>`:"";
  return `<div class="opt${sel?" sel":""}"${click}>${pic}<div class="lbl"><b>${sel?"✓ ":""}${label}</b>${info}</div></div>`}
 function card(a){const low=a.confidence&&!["mbid","high"].includes(a.confidence);
- const warn=low?`<div class="warn">Uncertain match (${a.confidence}): MusicBrainz has “${esc(a.release_title)}” by ${esc(a.release_artist)}</div>`:"";
+ const warn=low?`<div class="warn">The match is not sure (${a.confidence}). MusicBrainz shows “${esc(a.release_title)}” by ${esc(a.release_artist)}.</div>`:"";
  return `<div class="card" id="c-${a.id}"><div class="t">${esc(a.album)}</div><div class="a">${esc(a.artist)}</div>${warn}<div class="pair">${opt(a,"current")}${opt(a,"new")}</div></div>`}
 function shown(){return data.albums.filter(a=>(filter==="all"||(filter==="chosen"?choices[a.id]==="new":cat(a)===filter))
  &&(!q||(a.album+" "+a.artist).toLowerCase().includes(q)))}
@@ -1591,27 +1590,27 @@ function counts(){const c={all:data.albums.length,chosen:Object.keys(choices).le
 function render(){counts();const list=shown();$("#grid").innerHTML=list.length?list.map(card).join(""):"<p>No albums in this view.</p>"}
 async function save(update,full){for(const[k,v]of Object.entries(update)){if(v==="new")choices[k]="new";else delete choices[k]}
  if(full)render();else{counts();for(const id of Object.keys(update)){const el=document.getElementById("c-"+id),a=data.albums.find(x=>x.id===id);if(el&&a)el.outerHTML=card(a)}}
- $("#status").textContent="Saving…";
+ $("#status").textContent="Polyhymnia saves the selection.";
  try{const r=await fetch("/api/choices",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(update)});
-  if(!r.ok)throw new Error(r.status);const d=await r.json();$("#status").textContent=`Saved · ${d.new} album(s) will get the new cover`}
- catch(e){$("#status").textContent="Not saved - is covers-review still running?"}}
+  if(!r.ok)throw new Error(r.status);const d=await r.json();$("#status").textContent=`Saved. Albums with a new cover: ${d.new}.`}
+ catch(e){$("#status").textContent="Not saved. Make sure that covers-review is active on the server."}}
 $("#grid").addEventListener("click",e=>{if(e.target.closest("a"))return;const o=e.target.closest(".opt[data-id]");if(o)save({[o.dataset.id]:o.dataset.c})});
 $("#filters").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){filter=b.dataset.f;render();scrollTo(0,0)}});
 $("#q").addEventListener("input",e=>{q=e.target.value.trim().toLowerCase();render()});
 function bulk(choice){const ids=shown().filter(a=>choice!=="new"||a.new).map(a=>a.id);if(!ids.length)return;
- const what=choice==="new"?"use the new cover":"keep the current cover";
- if(confirm(`Set ${ids.length} album(s) to ${what}?`))save(Object.fromEntries(ids.map(i=>[i,choice])),true)}
+ const what=choice==="new"?"Use the new cover":"Keep the current cover";
+ if(confirm(`${what} for ${ids.length} album(s)?`))save(Object.fromEntries(ids.map(i=>[i,choice])),true)}
 $("#allNew").onclick=()=>bulk("new");$("#allCur").onclick=()=>bulk("current");
 fetch("/api/albums").then(r=>r.json()).then(d=>{data=d;choices=d.choices||{};
  if(!data.albums.some(a=>cat(a)==="different"))filter=data.albums.some(a=>cat(a)==="missing")?"missing":"all";render()})
- .catch(()=>{$("#grid").innerHTML="<p>Could not load the album list.</p>"});
+ .catch(()=>{$("#grid").innerHTML="<p>Polyhymnia cannot load the list of albums.</p>"});
 </script></body></html>"""
 
 
 def cmd_covers_review(args):
     index_path = os.path.join(args.dir, "index.json")
     if not os.path.exists(index_path):
-        sys.exit(f"{index_path} not found - run covers-fetch first.")
+        sys.exit(f"Cannot find {index_path}. Do covers-fetch first.")
     with open(index_path, encoding="utf-8") as f:
         index = json.load(f)
     choices_path = os.path.join(args.dir, "choices.json")
@@ -1674,14 +1673,15 @@ def cmd_covers_review(args):
 
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     host = socket.gethostname()
-    print(f"Cover picker running. Open http://{host}:{args.port}/ (or http://<server-ip>:{args.port}/) "
-          f"in your browser.\nChoices are saved to {choices_path} as you click. Press Ctrl+C here when done.")
+    print(f"The cover picker is active. In your browser, open http://{host}:{args.port}/ "
+          f"(or http://<server-ip>:{args.port}/).\nPolyhymnia saves each selection to {choices_path} immediately. "
+          f"When you have completed the selection, press Ctrl+C here.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
-    print(f"\nStopped. {len(choices)} album(s) set to get the new cover. "
-          f"Next: jfa covers-apply")
+    print(f"\nStopped. Albums with a new cover: {len(choices)}. "
+          f"Next step: jfa covers-apply")
 
 
 def cmd_covers_apply(args):
@@ -1702,7 +1702,7 @@ def cmd_covers_apply(args):
                        "backup_file": os.path.join(folder, e["current"]["file"]) if e.get("current") else None,
                        "label": f"{e['artist']} - {e['album']}"}
     if not covers:
-        print("No album is set to get the new cover - pick some with covers-review first.")
+        print("No album has a new cover selected. First, select the covers with covers-review.")
         return
     run_changes(make_jf(args), {}, args, covers=covers)
 
@@ -1713,7 +1713,7 @@ def make_jf(args):
     url = args.server or os.environ.get("JELLYFIN_URL")
     key = args.api_key or os.environ.get("JELLYFIN_API_KEY")
     if not url or not key:
-        sys.exit("Set JELLYFIN_URL and JELLYFIN_API_KEY (or pass --server and --api-key).")
+        sys.exit("Set JELLYFIN_URL and JELLYFIN_API_KEY, or use --server and --api-key.")
     return Jellyfin(url, key, args.user)
 
 
@@ -1721,95 +1721,95 @@ def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--server", help="Jellyfin URL (default: $JELLYFIN_URL)")
     common.add_argument("--api-key", help="Jellyfin API key (default: $JELLYFIN_API_KEY)")
-    common.add_argument("--user", help="Jellyfin user to query as (default: first administrator)")
+    common.add_argument("--user", help="Jellyfin user for the requests (default: the first administrator)")
     common.add_argument("--contact", default=os.environ.get("MB_CONTACT", "no-contact-given"),
-                        help="Email/URL sent to MusicBrainz in the User-Agent (default: $MB_CONTACT)")
+                        help="email address or URL for MusicBrainz (default: $MB_CONTACT)")
 
     writing = argparse.ArgumentParser(add_help=False)
-    writing.add_argument("--commit", action="store_true", help="actually write changes (default is a dry run)")
+    writing.add_argument("--commit", action="store_true", help="write the changes (without this option, the command is a dry run)")
     writing.add_argument("--no-lock", action="store_true",
-                         help="don't lock the Name field of renamed items against metadata refreshes")
+                         help="do not lock the Name field of changed items")
     writing.add_argument("--lock-item", action="store_true",
-                         help="lock changed items completely (protects artists from refreshes too)")
-    writing.add_argument("--backup", help="backup file name (default: backup-<timestamp>.json)")
+                         help="lock all fields of changed items (this also protects the artists)")
+    writing.add_argument("--backup", help="name of the backup file (default: backup-<timestamp>.json)")
 
     picking = argparse.ArgumentParser(add_help=False)
-    picking.add_argument("--library", help="only this music library (by name)")
-    picking.add_argument("--album", help="only albums whose name or artist contains this text")
-    picking.add_argument("--limit", type=int, help="stop after N albums (handy for a first test)")
+    picking.add_argument("--library", help="use only this music library (name)")
+    picking.add_argument("--album", help="use only the albums whose name or artist contains this text")
+    picking.add_argument("--limit", type=int, help="stop after N albums (use this for a first test)")
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("audit", parents=[common, picking], help="compare Jellyfin with MusicBrainz, write a CSV")
+    a = sub.add_parser("audit", parents=[common, picking], help="compare Jellyfin with MusicBrainz and write a CSV report")
     a.add_argument("-o", "--output", default="jellyfin_music_report.csv")
     a.add_argument("--straight-quotes", action="store_true",
-                   help="propose plain ' \" - instead of MusicBrainz's typographic ’ “ ‐")
+                   help="use plain ' \" - instead of the typographic ’ “ ‐ from MusicBrainz")
     a.add_argument("--compare-covers", action="store_true",
-                   help="also flag existing covers that look different from MusicBrainz (needs Pillow)")
+                   help="also show current covers that are different from MusicBrainz (uses Pillow)")
     a.add_argument("--cover-threshold", type=int, default=12,
-                   help="image-hash distance (0-64) above which covers count as different (default 12)")
+                   help="image-hash distance (0-64). Above this value, two covers are different (default 12)")
     a.add_argument("--sentence-case", metavar="FIELDS",
-                   help="comma list of track,album,artist (or all): capitalize only the first word "
-                        "and words that need it, e.g. 'Wake me up when September ends'")
+                   help="comma list of track, album, artist (or all). Only the first word and words that must "
+                        "have a capital keep a capital, for example 'Wake me up when September ends'")
     a.add_argument("--keep-caps", metavar="FILE",
-                   help="words/phrases that keep their capitals with --sentence-case "
-                        "(default: keep_caps.txt if it exists)")
+                   help="file with words and phrases that keep their capitals with --sentence-case "
+                        "(default: keep_caps.txt, if it is there)")
     a.add_argument("--cache", default=".musicbrainz_cache.json",
-                   help="cache file for MusicBrainz answers so re-runs are fast ('' to disable)")
+                   help="cache file for MusicBrainz answers. It makes a second run fast (use '' for no cache)")
     a.set_defaults(func=cmd_audit)
 
-    ap = sub.add_parser("apply", parents=[common, writing], help="push approved fixes from the audit CSV to Jellyfin")
+    ap = sub.add_parser("apply", parents=[common, writing], help="write the approved rows of the audit CSV to Jellyfin")
     ap.add_argument("report")
     ap.set_defaults(func=cmd_apply)
 
     en = sub.add_parser("export-names", parents=[common, picking],
-                        help="write album names, artists and track titles to JSON for editing")
+                        help="write album names, artists and track titles to JSON files that you can edit")
     en.add_argument("-o", "--output", default="jellyfin_names.json")
-    en.add_argument("--split", type=int, metavar="N", help="N albums per file (e.g. 250) for easier review")
+    en.add_argument("--split", type=int, metavar="N", help="N albums in each file (for example 250). Smaller files are easier to examine.")
     en.set_defaults(func=cmd_export_names)
 
     im = sub.add_parser("import-names", parents=[common, writing],
-                        help="apply the values you edited in an export-names file")
-    im.add_argument("original", help="the file export-names wrote")
-    im.add_argument("edited", help="your edited copy of it")
+                        help="write the values that you changed in an export-names file to Jellyfin")
+    im.add_argument("original", help="the file from export-names")
+    im.add_argument("edited", help="your edited copy of that file")
     im.set_defaults(func=cmd_import_names)
 
     ck = sub.add_parser("check-names", parents=[common, writing],
-                        help="check that Jellyfin has the names from your edited files (--fix to repair)")
+                        help="compare Jellyfin with your edited files (with --fix: correct the differences)")
     ck.add_argument("edited", nargs="+", help="one or more edited files")
     ck.add_argument("--fix", action="store_true",
-                    help="also plan the writes that make Jellyfin match the files (dry run unless --commit)")
+                    help="also make a plan to correct the differences (a dry run without --commit)")
     ck.add_argument("-o", "--output", default="check_names.txt")
     ck.set_defaults(func=cmd_check_names)
 
     lk = sub.add_parser("lock-names", parents=[common, writing],
-                        help="lock the name of every album and track in the edited files against scans")
+                        help="lock the names of all albums and tracks in the edited files, so that scans cannot change them")
     lk.add_argument("edited", nargs="+", help="one or more edited files")
     lk.set_defaults(func=cmd_lock_names)
 
     cf = sub.add_parser("covers-fetch", parents=[common, picking],
-                        help="download current covers and the best cover online for every album")
-    cf.add_argument("--dir", default="covers", help="where to keep the images (default: covers)")
-    cf.add_argument("--refetch", action="store_true", help="fetch albums again even if already done")
-    cf.add_argument("--cache", default=".musicbrainz_cache.json", help="MusicBrainz cache file ('' to disable)")
+                        help="download the current cover and the best online cover for each album")
+    cf.add_argument("--dir", default="covers", help="folder for the images (default: covers)")
+    cf.add_argument("--refetch", action="store_true", help="download all albums again, also the albums from an earlier run")
+    cf.add_argument("--cache", default=".musicbrainz_cache.json", help="MusicBrainz cache file (use '' for no cache)")
     cf.set_defaults(func=cmd_covers_fetch)
 
-    cr = sub.add_parser("covers-review", parents=[common], help="web page to pick current or new cover per album")
+    cr = sub.add_parser("covers-review", parents=[common], help="web page to select the current or the new cover for each album")
     cr.add_argument("--dir", default="covers")
     cr.add_argument("--port", type=int, default=8765)
-    cr.add_argument("--bind", default="0.0.0.0", help="address to listen on (default: all)")
+    cr.add_argument("--bind", default="0.0.0.0", help="network address for the web page (default: all addresses)")
     cr.add_argument("--cover-threshold", type=int, default=12,
-                    help="image-hash distance (0-64) above which art counts as different (default 12)")
+                    help="image-hash distance (0-64). Above this value, two covers are different (default 12)")
     cr.set_defaults(func=cmd_covers_review)
 
-    ca = sub.add_parser("covers-apply", parents=[common, writing], help="upload the covers you picked")
+    ca = sub.add_parser("covers-apply", parents=[common, writing], help="upload the covers that you selected")
     ca.add_argument("--dir", default="covers")
     ca.set_defaults(func=cmd_covers_apply)
 
-    r = sub.add_parser("restore", parents=[common], help="undo an apply/import/covers-apply using its backup")
+    r = sub.add_parser("restore", parents=[common], help="restore the initial values from a backup file")
     r.add_argument("backup")
-    r.add_argument("--commit", action="store_true")
+    r.add_argument("--commit", action="store_true", help="restore the values (without this option, the command is a dry run)")
     r.set_defaults(func=cmd_restore)
 
     args = p.parse_args()
